@@ -2,6 +2,9 @@
 import numpy as np
 
 def evaluate(env, policy, episodes=10, seed=42):
+    if env is None:
+        # offline-only mode on Mac: skip rollouts
+        return float("nan"), float("nan")
     returns = []
     for ep in range(episodes):
         obs, done, ret = env.reset(seed=seed+ep), False, 0.0
