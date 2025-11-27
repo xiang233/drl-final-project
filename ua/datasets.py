@@ -1,4 +1,3 @@
-# ua/datasets.py
 import os
 import numpy as np
 import h5py
@@ -19,7 +18,7 @@ def z_norm_states(S, s_mean=None, s_std=None, eps=1e-6):
         return (S - s_mean.astype(np.float32)) / (s_std.astype(np.float32) + eps)
 
 def _hdf5_path(env_name: str) -> str:
-    # Expect files named exactly like D4RL: <env>.hdf5 under ~/.d4rl
+    # it expect files named exactly like D4RL: <env>.hdf5 under ~/.d4rl
     return os.path.join(os.path.expanduser("~"), ".d4rl", f"{env_name}.hdf5")
 
 def load_d4rl(env_name: str, seed: int = 123, require_env: bool = False):

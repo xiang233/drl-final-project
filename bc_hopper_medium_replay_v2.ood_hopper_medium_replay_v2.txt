@@ -1,0 +1,8 @@
+env=hopper-medium-replay-v2
+ckpt=bc_hopper_medium_replay_v2.pt
+N=200000
+kstate=10
+mean=0.281838
+median=0.254311
+p90=0.500989
+p95=0.587719

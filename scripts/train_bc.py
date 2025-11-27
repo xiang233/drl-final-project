@@ -1,4 +1,3 @@
-# scripts/train_bc.py
 import argparse
 from itertools import cycle
 
@@ -58,7 +57,6 @@ def main(env_name="hopper-medium-replay-v2", seed=0, steps=20000, bs=1024):
         train_ds, batch_size=bs, shuffle=True, drop_last=True
     )
 
-    # Exactly `steps` updates
     pi.train()
     updates = 0
     for s, a in cycle(dl):

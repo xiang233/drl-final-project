@@ -1,0 +1,8 @@
+env=hopper-medium-replay-v2
+ckpt=td3bc_u_hopper_medium_replay_v2.pt
+N=200000
+kstate=10
+mean=0.349830
+median=0.327602
+p90=0.540317
+p95=0.621753
