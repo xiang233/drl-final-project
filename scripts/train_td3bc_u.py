@@ -54,8 +54,12 @@ def main(env_name="hopper-medium-replay-v2",
     N, obs_dim = S.shape
     act_dim = A.shape[1]
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
     actor = Actor(obs_dim, act_dim).to(device)
     actor_targ = Actor(obs_dim, act_dim).to(device)
     actor_targ.load_state_dict(actor.state_dict())
@@ -147,7 +151,7 @@ def main(env_name="hopper-medium-replay-v2",
         "cfg": dict(gamma=gamma, tau=tau, base_w=base_w, w_min=w_min, w_max=w_max,
                     actor_lr=actor_lr, critic_lr=critic_lr, policy_delay=policy_delay, steps=steps, bs=bs)
     }
-    out_path = f"td3bc_u_{env_name.replace('-','_')}.pt"
+    out_path = f"td3bc_u_{env_name.replace('-','_')}_seed{seed}.pt"
     torch.save(out, out_path)
     print(f"Saved: {out_path}")
 

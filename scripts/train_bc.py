@@ -80,7 +80,7 @@ def main(env_name="hopper-medium-replay-v2", seed=0, steps=20000, bs=1024):
         val_mse = mse(pi(s_va), a_va).item()
     print(f"Validation BC MSE: {val_mse:.4f}")
 
-    out_path = f"bc_{env_name.replace('-', '_')}.pt"
+    out_path = f"bc_{env_name.replace('-', '_')}_seed{seed}.pt"
     torch.save({"model": pi.state_dict(),
                 "env_name": env_name,
                 "seed": seed,
