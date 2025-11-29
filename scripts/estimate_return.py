@@ -1,5 +1,6 @@
 # scripts/estimate_return.py
 import argparse
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -82,9 +83,8 @@ def load_policy(path, s_dim, a_dim, device):
         return pi
 
     # ---- TD3BC-U ----
-    # Your TD3BC-U checkpoints look like:
+    # TD3BC-U checkpoints look like:
     #   {"actor": ..., "critics": ..., "K": ..., "env_name": ..., "seed": ..., "cfg": {...}}
-    # with no 'algo' initially, or algo == 'td3bc_u' if you added it.
     if algo == "td3bc_u" or (
         "actor" in state and "critics" in state and "K" in state and "v" not in state
     ):
@@ -116,7 +116,6 @@ def load_policy(path, s_dim, a_dim, device):
         return pi
 
     # ---- Fallback ----
-    # Unknown algo: try to interpret as MLP with either 'model' or 'actor'
     key = None
     if "model" in state:
         key = "model"
@@ -219,6 +218,39 @@ def fqe_evaluate(pi, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device=Non
     return v_hat
 
 
+def infer_method_from_state_or_name(state, ckpt_path):
+    algo = state.get("algo", None)
+    if algo is not None:
+        return algo
+    stem = os.path.splitext(os.path.basename(ckpt_path))[0]
+    if stem.startswith("bc_"):
+        return "bc"
+    if stem.startswith("td3bc_u_"):
+        return "td3bc_u"
+    if stem.startswith("iql_u_"):
+        return "iql_u"
+    if stem.startswith("iql_"):
+        return "iql"
+    return "unknown"
+
+
+def append_fqe_csv(csv_path, row):
+    """
+    Append a row dict to a CSV file. Create file + header if needed.
+    Expected columns: env, method, seed, ckpt, fqe_return
+    """
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    header = ["env", "method", "seed", "ckpt", "fqe_return"]
+    file_exists = os.path.exists(csv_path)
+
+    import csv
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 # --------- CLI entrypoint ---------
 
 if __name__ == "__main__":
@@ -227,10 +259,17 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--iters", type=int, default=20000)
+    ap.add_argument("--csv", type=str, default="", help="Optional CSV path to append FQE result")
     args = ap.parse_args()
 
-    set_seed(args.seed)
-    _, data = load_d4rl(args.env, args.seed)
+    # Load checkpoint metadata first so we can infer env/method/seed
+    state = torch.load(args.ckpt, map_location="cpu")
+    env_name = state.get("env_name", args.env)
+    method = infer_method_from_state_or_name(state, args.ckpt)
+    seed = state.get("seed", args.seed)
+
+    set_seed(seed)
+    _, data = load_d4rl(env_name, seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     s_dim = data["S"].shape[1]
@@ -239,4 +278,15 @@ if __name__ == "__main__":
     pi = load_policy(args.ckpt, s_dim, a_dim, device)
     ret = fqe_evaluate(pi, data, iters=args.iters, device=device)
 
-    print(f"FQE estimated return for {args.ckpt} on {args.env}: {ret:.3f}")
+    print(f"FQE estimated return for {args.ckpt} on {env_name}: {ret:.3f}")
+
+    if args.csv:
+        row = {
+            "env": env_name,
+            "method": method,
+            "seed": seed,
+            "ckpt": os.path.basename(args.ckpt),
+            "fqe_return": f"{ret:.6f}",
+        }
+        append_fqe_csv(args.csv, row)
+        print(f"[INFO] Appended FQE result to {args.csv}")
