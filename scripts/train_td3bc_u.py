@@ -1,4 +1,5 @@
-# scripts/train_td3bc_u.py
+# scripts/train_td3bc_u.py  (PESSIMISTIC-Q TD3+BC-UA)
+
 import argparse
 import numpy as np
 import torch
@@ -9,9 +10,10 @@ from ua.datasets import load_d4rl
 from ua.utils import set_seed
 from ua.nets import Actor, CriticEnsemble, soft_update_
 
+
 def make_batch_indices(N, bs, rng):
-    idx = rng.integers(0, N, size=bs, dtype=np.int64)
-    return idx
+    return rng.integers(0, N, size=bs, dtype=np.int64)
+
 
 def main(env_name="hopper-medium-replay-v2",
          seed=0,
@@ -20,27 +22,36 @@ def main(env_name="hopper-medium-replay-v2",
          K=4,
          gamma=0.99,
          tau=0.005,
-         base_w=1.0,
-         w_min=0.1,
-         w_max=5.0,
+         base_w=2.5,       # alpha in TD3+BC: lambda = base_w / E|Q|
+         alpha_uq=1.0,     # strength of uncertainty penalty on Q
          actor_lr=3e-4,
          critic_lr=3e-4,
-         policy_delay=2):
+         policy_delay=2,
+         target_noise=0.2,
+         noise_clip=0.5):
     """
-    TD3+BC-UA (uncertainty-adaptive BC weight).
-    Uncertainty = std over Q-ensemble at Q(s, pi(s)); per-batch z-score -> per-sample weight.
+    TD3+BC-UA with Pessimistic Q.
+
+    Actor objective:
+        L_pi = - E[ lambda * ( Q(s, pi(s)) - alpha_uq * sigma_Q(s, pi(s)) )
+                     - ||pi(s) - a||^2 ]
+
+    where:
+      - lambda = base_w / E_s[ |Q(s, a_dataset)| ]
+      - sigma_Q is the std across the critic ensemble at (s, pi(s))
+      - BC term is unweighted (no UA on BC), so uncertainty directly
+        penalizes the Q-value instead of rescaling the imitation term.
     """
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
+
     S  = data["S"].astype(np.float32)
     A  = data["A"].astype(np.float32)
-    Rp = data.get("rewards", None)
-    Sn = data.get("S_next", None)
+    Rp = data["rewards"].astype(np.float32)
+    Sn = data["S_next"].astype(np.float32)
     terminals = data.get("terminals", None)
     timeouts  = data.get("timeouts", None)
 
-    if Rp is None or Sn is None:
-        raise ValueError("Dataset missing next_observations or rewards; required for TD3-style training.")
     if terminals is None:
         terminals = np.zeros((S.shape[0],), dtype=np.float32)
     if timeouts is None:
@@ -60,6 +71,7 @@ def main(env_name="hopper-medium-replay-v2",
         device = "mps"
     else:
         device = "cpu"
+
     actor = Actor(obs_dim, act_dim).to(device)
     actor_targ = Actor(obs_dim, act_dim).to(device)
     actor_targ.load_state_dict(actor.state_dict())
@@ -70,90 +82,132 @@ def main(env_name="hopper-medium-replay-v2",
 
     act_opt = optim.Adam(actor.parameters(), lr=actor_lr)
     crt_opt = optim.Adam(critics.parameters(), lr=critic_lr)
-    mse = nn.MSELoss(reduction='mean')
 
-    # numpy views for fast sampling
     rng = np.random.default_rng(seed)
     done_mask = np.clip(terminals + timeouts, 0, 1).astype(np.float32)
 
-    # pre-torch tensors to avoid repeated transfers (we'll index in torch)
+    # pre-torch tensors
     S_t  = torch.from_numpy(S).to(device)
     A_t  = torch.from_numpy(A).to(device)
-    R_t  = torch.from_numpy(Rp.squeeze().astype(np.float32)).to(device)
+    R_t  = torch.from_numpy(Rp.squeeze()).to(device)
     Sn_t = torch.from_numpy(Sn).to(device)
     D_t  = torch.from_numpy(done_mask.squeeze()).to(device)
 
-    # training loop
+    # logging placeholders
+    lam_val = torch.tensor(base_w, device=device)
+    sigma_Q_mean_val = torch.tensor(0.0, device=device)
+    Q_pess_mean_val = torch.tensor(0.0, device=device)
+
     for t in range(1, steps + 1):
         idx = make_batch_indices(N, bs, rng)
-        s  = S_t[idx]; a = A_t[idx]; r = R_t[idx]; s2 = Sn_t[idx]; d = D_t[idx]
+        s  = S_t[idx]
+        a  = A_t[idx]
+        r  = R_t[idx]
+        s2 = Sn_t[idx]
+        d  = D_t[idx]
 
+        # ---------- Critic update ----------
         with torch.no_grad():
-            # target policy smoothing (small noise, TD3-style)
+            # target policy with smoothing (TD3)
             a2 = actor_targ(s2)
-            # compute conservative target with min over ensemble
-            Qt = critics_t.forward(s2, a2, keepdim=True)  # [K,B,1]
-            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)  # [B]
-            y = r + gamma * (1.0 - d) * Qt_min
+            noise = torch.randn_like(a2) * target_noise
+            noise = torch.clamp(noise, -noise_clip, noise_clip)
+            a2_noisy = torch.clamp(a2 + noise, -1.0, 1.0)
 
-        # ----- critic update -----
-        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)  # [K,B]
-        critic_loss = torch.mean((Qs.transpose(0,1) - y.unsqueeze(-1))**2)  # average over ensemble and batch
+            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  # [K,B,1]
+            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    # [B]
+            y = r + gamma * (1.0 - d) * Qt_min                  # [B]
+
+        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    # [K,B]
+        critic_loss = torch.mean((Qs.transpose(0, 1) - y.unsqueeze(-1)) ** 2)
+
         crt_opt.zero_grad()
         critic_loss.backward()
         crt_opt.step()
 
-        # ----- delayed actor (TD3) -----
+        # ---------- Actor update (delayed) ----------
         if t % policy_delay == 0:
-            s_detach = s  # same batch
-            pi_s = actor(s_detach)
+            s_detach = s
+            pi_s = actor(s_detach)  # [B, act_dim]
 
-            # uncertainty = std over ensemble Q(s, pi(s)) per sample
+            # Q(s, pi(s)) with grad
+            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
+            Q_pi_mean = Q_pi_all.mean(dim=1)                           # [B]
+
+            # TD3+BC lambda normalization (no grad)
             with torch.no_grad():
-                Q_pi = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
-                uq = torch.std(Q_pi, dim=1)  # [B]
-                # batch z-score
-                mu = torch.mean(uq)
-                sd = torch.std(uq) + 1e-8
-                z = (uq - mu) / sd
-                w = torch.clamp(base_w * (1.0 + z), min=w_min, max=w_max)  # higher w when uncertainty higher
+                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  # [B]
+                Q_mean_abs = Q_bc.abs().mean()
+                lam = base_w / (Q_mean_abs + 1e-8)
 
-            # TD3+BC actor loss: -Q_mean(s, pi(s)) + w * ||pi(s) - a||^2 (per-sample)
-            Q_pi_mean = torch.mean(Q_pi, dim=1)  # [B]
-            imitation_err = torch.mean(w * torch.sum((pi_s - a)**2, dim=1))
-            actor_loss = -Q_pi_mean.mean() + imitation_err
+            # Uncertainty signal with grad
+            sigma_Q = Q_pi_all.std(dim=1)  # [B]
+
+            # Pessimistic Q
+            Q_pess = Q_pi_mean - alpha_uq * sigma_Q  # [B]
+
+            # Plain BC term (no UA weight)
+            bc_term = torch.sum((pi_s - a) ** 2, dim=1)  # [B]
+
+            # Actor loss: minimize [ -lambda * Q_pess + ||pi - a||^2 ]
+            actor_loss = -(lam * Q_pess - bc_term).mean()
 
             act_opt.zero_grad()
             actor_loss.backward()
             act_opt.step()
 
-            # soft target updates
+            # soft targets
             soft_update_(critics, critics_t, tau)
             soft_update_(actor, actor_targ, tau)
 
+            # update logging scalars
+            lam_val = lam.detach()
+            sigma_Q_mean_val = sigma_Q.mean().detach()
+            Q_pess_mean_val = Q_pess.mean().detach()
+
+        # ---------- Logging ----------
         if t % 1000 == 0:
-            # lightweight logging
             with torch.no_grad():
                 pi_train = actor(S_t[:4096])
-                Q_mean = critics.forward(S_t[:4096], pi_train, keepdim=False).mean().item()
-            print(f"[{t}/{steps}] critic_loss={critic_loss.item():.4f} "
-                  f"Q_mean@pi={Q_mean:.3f} "
-                  f"(w: mean={w.mean().item():.3f}, min={w.min().item():.3f}, max={w.max().item():.3f})")
+                Q_mean_log = critics.forward(S_t[:4096], pi_train, keepdim=False).mean().item()
 
-    # save checkpoint
+            print(
+                f"[{t}/{steps}] "
+                f"critic_loss={critic_loss.item():.4f} "
+                f"Q_mean@pi={Q_mean_log:.3f} "
+                f"(lambda={lam_val.item():.4f}, "
+                f"sigma_Q={sigma_Q_mean_val.item():.3f}, "
+                f"Q_pess={Q_pess_mean_val.item():.3f})"
+            )
+
+    # ---------- Save checkpoint ----------
     out = {
         "env_name": env_name,
         "seed": seed,
         "K": K,
         "actor": actor.state_dict(),
         "critics": critics.state_dict(),
-        "s_mean": s_mean, "s_std": s_std,
-        "cfg": dict(gamma=gamma, tau=tau, base_w=base_w, w_min=w_min, w_max=w_max,
-                    actor_lr=actor_lr, critic_lr=critic_lr, policy_delay=policy_delay, steps=steps, bs=bs)
+        "s_mean": s_mean,
+        "s_std": s_std,
+        "cfg": dict(
+            gamma=gamma,
+            tau=tau,
+            base_w=base_w,
+            alpha_uq=alpha_uq,
+            actor_lr=actor_lr,
+            critic_lr=critic_lr,
+            policy_delay=policy_delay,
+            steps=steps,
+            bs=bs,
+            target_noise=target_noise,
+            noise_clip=noise_clip,
+        ),
+        "algo": "td3bc_u_pessimistic",
     }
-    out_path = f"td3bc_u_{env_name.replace('-','_')}_seed{seed}.pt"
+    out_path = f"td3bc_u_{env_name.replace('-', '_')}_seed{seed}.pt"
     torch.save(out, out_path)
     print(f"Saved: {out_path}")
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
@@ -164,13 +218,26 @@ if __name__ == "__main__":
     p.add_argument("--K", type=int, default=4)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--tau", type=float, default=0.005)
-    p.add_argument("--base_w", type=float, default=1.0)
-    p.add_argument("--w_min", type=float, default=0.1)
-    p.add_argument("--w_max", type=float, default=5.0)
+    p.add_argument("--base_w", type=float, default=2.5)
+    p.add_argument("--alpha_uq", type=float, default=1.0)
     p.add_argument("--actor_lr", type=float, default=3e-4)
     p.add_argument("--critic_lr", type=float, default=3e-4)
     p.add_argument("--policy_delay", type=int, default=2)
+    p.add_argument("--target_noise", type=float, default=0.2)
+    p.add_argument("--noise_clip", type=float, default=0.5)
     args = p.parse_args()
-    main(env_name=args.env, seed=args.seed, steps=args.steps, bs=args.bs, K=args.K,
-         gamma=args.gamma, tau=args.tau, base_w=args.base_w, w_min=args.w_min, w_max=args.w_max,
-         actor_lr=args.actor_lr, critic_lr=args.critic_lr, policy_delay=args.policy_delay)
+
+    main(env_name=args.env,
+         seed=args.seed,
+         steps=args.steps,
+         bs=args.bs,
+         K=args.K,
+         gamma=args.gamma,
+         tau=args.tau,
+         base_w=args.base_w,
+         alpha_uq=args.alpha_uq,
+         actor_lr=args.actor_lr,
+         critic_lr=args.critic_lr,
+         policy_delay=args.policy_delay,
+         target_noise=args.target_noise,
+         noise_clip=args.noise_clip)

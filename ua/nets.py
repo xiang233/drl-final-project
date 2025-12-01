@@ -24,7 +24,8 @@ class Actor(nn.Module):
             nn.Linear(hid, act_dim)
         )
     def forward(self, s):
-        return self.net(s)
+        # *** CORRECTED: Apply tanh to bound actions to [-1, 1] ***
+        return torch.tanh(self.net(s))
 
 class Critic(nn.Module):
     """Deterministic Q(s,a) scalar"""
@@ -51,7 +52,8 @@ class CriticEnsemble(nn.Module):
         return Q.squeeze(-1).transpose(0, 1)  # [B, K]
 
     def clone_targets(self):
-        tgt = CriticEnsemble(1, 1, K=len(self.members))  # dummy init then overwrite
+        # Note: Dims are overwritten by load_state_dict, so dummy init is fine
+        tgt = CriticEnsemble(1, 1, K=len(self.members)) 
         tgt.members = nn.ModuleList([copy.deepcopy(m) for m in self.members])
         for p in tgt.parameters():
             p.requires_grad_(False)

@@ -1,3 +1,4 @@
+#scripts/train_bc.py
 import argparse
 from itertools import cycle
 

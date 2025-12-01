@@ -1,3 +1,4 @@
+#tools/collect_results.py
 #!/usr/bin/env python
 """
 Collect FQE and OOD stats for all checkpoints and aggregate to CSV + Markdown.
