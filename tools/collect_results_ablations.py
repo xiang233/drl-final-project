@@ -1,20 +1,21 @@
 #!/usr/bin/env python
 """
-Collect FQE and OOD stats for all checkpoints and aggregate to CSV + Markdown.
+Collect FQE and OOD stats for all checkpoints (including TD3BC-U ablations)
+and aggregate to CSV + Markdown.
 
 Usage (from repo root):
-  python -m tools.collect_results --pt_dir generated_data
+  python -m tools.collect_results_ablations --pt_dir generated_data
 
 This will:
-  - Scan pt_dir/*.pt
+  - Scan generated_data/*.pt
   - For each ckpt:
       * infer env/method/seed
       * load OOD npz and compute mean/p50/p90/p95
       * recompute FQE via scripts.estimate_return
   - Write:
-      results/suite_results.csv
-      results/suite_results_summary.csv
-      results/suite_results_summary.md
+      results/suite_results_ablations.csv
+      results/suite_results_ablations_summary.csv
+      results/suite_results_ablations_summary.md
 """
 
 import argparse
@@ -39,18 +40,18 @@ def infer_method_from_name(stem: str) -> str:
     """
     Infer algorithm name from checkpoint filename stem.
 
-    Examples:
-      'bc_hopper_medium_replay_v2_seed0'                 -> 'bc'
-      'iql_hopper_medium_replay_v2_seed0'                -> 'iql'
-      'iql_u_hopper_medium_replay_v2_seed0'              -> 'iql_u'
-      'iql_u_mcdo_hopper_medium_replay_v2_seed0'         -> 'iql_u_mcdo'
-      'td3bc_hopper_medium_replay_v2_seed0'              -> 'td3bc'
-      'td3bc_u_hopper_medium_replay_v2_seed0'            -> 'td3bc_u'
-      'td3bc_u_mcdo_hopper_medium_replay_v2_seed0'       -> 'td3bc_u_mcdo'
-      'td3bc_u_pessimist0_hopper_medium_replay_v2_seed0' -> 'td3bc_u_pessimistic_alpha0.0'
-      'td3bc_u_pessimist0.3_hopper_medium_replay_v2...'  -> 'td3bc_u_pessimistic_alpha0.3'
-      'td3bc_u_pessimist0.5_hopper_medium_replay_v2...'  -> 'td3bc_u_pessimistic_alpha0.5'
-      'td3bc_u_pessimist1_hopper_medium_replay_v2...'    -> 'td3bc_u_pessimistic_alpha1.0'
+    Examples (with your current naming):
+      'bc_hopper_medium_replay_v2_seed0'                  -> 'bc'
+      'iql_hopper_medium_replay_v2_seed0'                 -> 'iql'
+      'iql_u_hopper_medium_replay_v2_seed0'               -> 'iql_u'
+      'iql_u_mcdo_hopper_medium_replay_v2_seed0'          -> 'iql_u_mcdo'
+      'td3bc_hopper_medium_replay_v2_seed0'               -> 'td3bc'
+      'td3bc_u_hopper_medium_replay_v2_seed0'             -> 'td3bc_u'
+      'td3bc_u_mcdo_hopper_medium_replay_v2_seed0'        -> 'td3bc_u_mcdo'
+      'td3bc_u_pessimist0_hopper_medium_replay_v2_seed0'  -> 'td3bc_u_pessimistic_alpha0.0'
+      'td3bc_u_pessimist0.3_hopper_medium_replay_v2...'   -> 'td3bc_u_pessimistic_alpha0.3'
+      'td3bc_u_pessimist0.5_hopper_medium_replay_v2...'   -> 'td3bc_u_pessimistic_alpha0.5'
+      'td3bc_u_pessimist1_hopper_medium_replay_v2...'     -> 'td3bc_u_pessimistic_alpha1.0'
     """
     # BC
     if stem.startswith("bc_"):
@@ -68,17 +69,21 @@ def infer_method_from_name(stem: str) -> str:
     if stem.startswith("td3bc_u_mcdo_"):
         return "td3bc_u_mcdo"
 
-    # TD3BC-U pessimistic ablations (alpha encoded in name)
-    if stem.startswith("td3bc_u_pessimist0.3_"):
-        return "td3bc_u_pessimistic_alpha0.3"
-    if stem.startswith("td3bc_u_pessimist0.5_"):
-        return "td3bc_u_pessimistic_alpha0.5"
-    if stem.startswith("td3bc_u_pessimist1_"):
-        return "td3bc_u_pessimistic_alpha1.0"
+    # TD3BC-U pessimistic ablations (by alpha *encoded in the name*)
+    # alpha = 0.0
     if stem.startswith("td3bc_u_pessimist0_"):
         return "td3bc_u_pessimistic_alpha0.0"
+    # alpha = 0.3
+    if stem.startswith("td3bc_u_pessimist0.3_"):
+        return "td3bc_u_pessimistic_alpha0.3"
+    # alpha = 0.5
+    if stem.startswith("td3bc_u_pessimist0.5_"):
+        return "td3bc_u_pessimistic_alpha0.5"
+    # alpha = 1.0
+    if stem.startswith("td3bc_u_pessimist1_"):
+        return "td3bc_u_pessimistic_alpha1.0"
 
-    # Generic TD3BC-U (non-pessimist)
+    # Generic TD3BC-U (non-pessimistic)
     if stem.startswith("td3bc_u_"):
         return "td3bc_u"
 
@@ -235,8 +240,10 @@ def collect_for_ckpt(
         print(f"[WARN] {ckpt_path} missing 'env_name'; skipping.")
         return None
 
-    # Method: first infer from filename (handles ablations), then fall back to algo
+    # 1) Try to infer method from filename (for ablations etc.)
     method = infer_method_from_name(stem)
+
+    # 2) If unknown, fall back to algo field (if present)
     if method == "unknown" and algo is not None:
         method = algo
 
@@ -284,12 +291,9 @@ def main():
     ap.add_argument("--ood_subdir", type=str, default=None,
                     help="Optional subdir under pt_dir where OOD .npz live (e.g. 'oods').")
     ap.add_argument("--results_dir", type=str, default="results",
-                    help="Where to write suite_results.csv and summaries.")
+                    help="Where to write suite_results_*.csv and summaries.")
     ap.add_argument("--fqe_iters", type=int, default=20000,
                     help="Number of FQE iterations per checkpoint.")
-    ap.add_argument("--env_filter", type=str, default=None,
-                    help="If set, only keep rows whose env contains this substring "
-                         "(e.g. 'antmaze-umaze-v2').")
     args = ap.parse_args()
 
     pt_dir = args.pt_dir
@@ -307,7 +311,12 @@ def main():
 
     for ck in ckpts:
         print(f"[INFO] Processing {ck} ...")
-        row = collect_for_ckpt(ck, fqe_iters=fqe_iters, pt_dir=pt_dir, ood_subdir=ood_subdir)
+        row = collect_for_ckpt(
+            ck,
+            fqe_iters=fqe_iters,
+            pt_dir=pt_dir,
+            ood_subdir=ood_subdir,
+        )
         if row is not None:
             rows.append(row)
 
@@ -316,28 +325,21 @@ def main():
         return
 
     df = pd.DataFrame(rows)
-
-    # Optional: env filter (handy when you just ran antmaze)
-    if args.env_filter is not None:
-        before = len(df)
-        df = df[df["env"].str.contains(args.env_filter)]
-        print(f"[INFO] Filtered env by '{args.env_filter}': {before} -> {len(df)} rows")
-
     os.makedirs(results_dir, exist_ok=True)
 
     # 1) Write raw per-seed CSV
-    base_csv = Path(results_dir) / "suite_results.csv"
+    base_csv = Path(results_dir) / "suite_results_ablations.csv"
     df.to_csv(base_csv, index=False)
     print(f"[INFO] Wrote per-seed results to {base_csv}")
 
     # 2) Aggregate and write summary CSV + Markdown
     out = agg(df)
-    summary_csv = base_csv.with_name("suite_results_summary.csv")
+    summary_csv = base_csv.with_name("suite_results_ablations_summary.csv")
     out.to_csv(summary_csv, index=False)
     print(f"[INFO] Wrote summary CSV to {summary_csv}")
 
     md = to_markdown(out)
-    summary_md = base_csv.with_name("suite_results_summary.md")
+    summary_md = base_csv.with_name("suite_results_ablations_summary.md")
     summary_md.write_text(md)
     print(f"[INFO] Wrote summary Markdown to {summary_md}")
 

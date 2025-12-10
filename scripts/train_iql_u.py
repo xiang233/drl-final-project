@@ -253,7 +253,14 @@ def main(env_name="hopper-medium-replay-v2",
         ),
         "algo": "iql_u",
     }
-    out_path = f"iql_u_{env_name.replace('-','_')}_seed{seed}.pt"
+
+    # encode unc_alpha in the filename so different alphas don't overwrite each other
+    # e.g. unc_alpha=1.0 -> "alpha1", unc_alpha=0.3 -> "alpha0.3"
+    alpha_str = f"{unc_alpha}".rstrip("0").rstrip(".")  # 1.0 -> "1", 0.30 -> "0.3"
+    env_slug = env_name.replace("-", "_")
+    out_stem = f"iql_u_alpha{alpha_str}_{env_slug}_seed{seed}"
+    out_path = f"{out_stem}.pt"
+
     torch.save(out, out_path)
     print(f"Saved: {out_path}")
 

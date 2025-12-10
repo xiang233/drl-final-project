@@ -47,45 +47,36 @@ class PolicyNetwork(nn.Module):
 def load_policy(path, s_dim, a_dim, device):
     """
     Load a policy from a checkpoint, handling:
-      - BC:          {'model': MLP.state_dict(), 'algo': 'bc' or no 'algo'}
-      - TD3BC-U:     {'actor': Actor.state_dict(), 'algo': 'td3bc_u'} (or no 'algo')
-      - IQL:         {'model': PolicyNetwork.state_dict(), 'algo': 'iql'}
-      - IQL-U:       {'actor': PolicyNetwork.state_dict(), 'algo': 'iql_u'}
+      - BC:                  {'model': MLP.state_dict(), 'algo': 'bc' or no 'algo'}
+      - TD3BC-U (+ variants):{'actor': Actor.state_dict(), 'algo': 'td3bc_u' / 'td3bc_u_pessimistic' / 'td3bc_u_pessimistic_mcdo'}
+      - IQL:                 {'model': PolicyNetwork.state_dict(), 'algo': 'iql'}
+      - IQL-U (+ mcdo):      {'actor': PolicyNetwork.state_dict(), 'algo': 'iql_u' / 'iql_u_mcdo'}
     Falls back to MLP if algo is unknown but we find 'model' or 'actor'.
     """
     state = torch.load(path, map_location=device)
     algo = state.get("algo", None)
 
-    # ---- IQL (explicit) ----
-    if algo == "iql":
+    # ---- IQL / IQL-U / IQL-U-MCDO ----
+    # Unify all these as the same deterministic PolicyNetwork architecture.
+    if algo in ("iql", "iql_u", "iql_u_mcdo"):
         pi = PolicyNetwork(s_dim, a_dim).to(device)
-        actor_sd = state.get("model")
-        if actor_sd is None:
-            raise KeyError(
-                f"Expected 'model' key in IQL checkpoint {path}, "
-                f"found keys: {list(state.keys())}"
-            )
-        pi.load_state_dict(actor_sd, strict=True)
-        pi.eval()
-        return pi
-
-    # ---- IQL-U (explicit) ----
-    if algo == "iql_u":
-        pi = PolicyNetwork(s_dim, a_dim).to(device)
+        # In our code:
+        #   - plain IQL saves under 'model'
+        #   - IQL-U / IQL-U-MCDO save under 'actor'
         actor_sd = state.get("actor") or state.get("model")
         if actor_sd is None:
             raise KeyError(
-                f"Expected 'actor' or 'model' key in IQL-U checkpoint {path}, "
+                f"Expected 'actor' or 'model' key in {algo} checkpoint {path}, "
                 f"found keys: {list(state.keys())}"
             )
         pi.load_state_dict(actor_sd, strict=True)
         pi.eval()
         return pi
 
-    # ---- TD3BC-U ----
+    # ---- TD3BC-U (+ pessimistic + mcdo variants) ----
     # TD3BC-U checkpoints look like:
     #   {"actor": ..., "critics": ..., "K": ..., "env_name": ..., "seed": ..., "cfg": {...}}
-    if algo == "td3bc_u" or (
+    if algo in ("td3bc_u", "td3bc_u_pessimistic", "td3bc_u_pessimistic_mcdo") or (
         "actor" in state and "critics" in state and "K" in state and "v" not in state
     ):
         try:
@@ -100,7 +91,7 @@ def load_policy(path, s_dim, a_dim, device):
         actor_sd = state.get("actor")
         if actor_sd is None:
             raise KeyError(
-                f"Expected 'actor' key in TD3BC-U checkpoint {path}, "
+                f"Expected 'actor' key in TD3BC-U-like checkpoint {path}, "
                 f"found keys: {list(state.keys())}"
             )
         pi.load_state_dict(actor_sd, strict=True)
@@ -128,8 +119,10 @@ def load_policy(path, s_dim, a_dim, device):
             f"algo={algo}, keys={list(state.keys())}"
         )
 
-    print(f"[WARN] Unknown algo '{algo}' in {path}; "
-          f"falling back to MLP using state['{key}'].")
+    print(
+        f"[WARN] Unknown algo '{algo}' in {path}; "
+        f"falling back to MLP using state['{key}']."
+    )
 
     pi = MLP(s_dim, a_dim).to(device)
     pi.load_state_dict(state[key], strict=False)
@@ -219,14 +212,22 @@ def fqe_evaluate(pi, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device=Non
 
 
 def infer_method_from_state_or_name(state, ckpt_path):
+    """
+    Infer a human-readable method name:
+      - Prefer explicit 'algo' field if present (e.g., 'iql_u_mcdo').
+      - Otherwise fall back to filename stem prefixes.
+    """
     algo = state.get("algo", None)
     if algo is not None:
         return algo
+
     stem = os.path.splitext(os.path.basename(ckpt_path))[0]
     if stem.startswith("bc_"):
         return "bc"
     if stem.startswith("td3bc_u_"):
         return "td3bc_u"
+    if stem.startswith("iql_u_mcdo_"):
+        return "iql_u_mcdo"
     if stem.startswith("iql_u_"):
         return "iql_u"
     if stem.startswith("iql_"):
