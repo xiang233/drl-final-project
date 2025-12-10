@@ -28,22 +28,27 @@ class Actor(nn.Module):
         return torch.tanh(self.net(s))
 
 class Critic(nn.Module):
-    """Deterministic Q(s,a) scalar"""
-    def __init__(self, obs_dim, act_dim, hid=256):
+    """Deterministic Q(s,a) scalar, now with optional dropout."""
+    def __init__(self, obs_dim, act_dim, hid=256, dropout_p: float = 0.0):
         super().__init__()
         self.q = nn.Sequential(
             nn.Linear(obs_dim + act_dim, hid), nn.ReLU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(hid, hid), nn.ReLU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(hid, 1)
         )
     def forward(self, s, a):
         return self.q(torch.cat([s, a], dim=-1))
 
 class CriticEnsemble(nn.Module):
-    """K independent critics; forward returns [K, B, 1] tensor if keepdim else [B, K]"""
-    def __init__(self, obs_dim, act_dim, K=4, hid=256):
+    """K independent critics; forward returns [K, B, 1] tensor if keepdim else [B, K]."""
+    def __init__(self, obs_dim, act_dim, K=4, hid=256, dropout_p: float = 0.0):
         super().__init__()
-        self.members = nn.ModuleList([Critic(obs_dim, act_dim, hid) for _ in range(K)])
+        self.members = nn.ModuleList(
+            [Critic(obs_dim, act_dim, hid=hid, dropout_p=dropout_p) for _ in range(K)]
+        )
+
     def forward(self, s, a, keepdim=False):
         outs: List[torch.Tensor] = [m(s, a) for m in self.members]  # each [B,1]
         Q = torch.stack(outs, dim=0)  # [K, B, 1]
@@ -52,9 +57,8 @@ class CriticEnsemble(nn.Module):
         return Q.squeeze(-1).transpose(0, 1)  # [B, K]
 
     def clone_targets(self):
-        # Note: Dims are overwritten by load_state_dict, so dummy init is fine
-        tgt = CriticEnsemble(1, 1, K=len(self.members)) 
-        tgt.members = nn.ModuleList([copy.deepcopy(m) for m in self.members])
+        # simpler & safer: full deepcopy
+        tgt = copy.deepcopy(self)
         for p in tgt.parameters():
             p.requires_grad_(False)
         return tgt
