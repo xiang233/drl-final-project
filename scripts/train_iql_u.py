@@ -1,4 +1,20 @@
 # scripts/train_iql_u.py
+#
+# IQL-UA with sigma_Q-based scaling of the advantage temperature.
+#
+# Policy extraction:
+#   weights(s,a) = exp( beta_eff(s) * norm_adv(s,a) )
+#
+# where:
+#   norm_adv is the z-scored advantage Q(s,a) - V(s),
+#   beta_eff(s) = beta * g(sigma_rel(s)),
+#   sigma_rel(s) = sigma_Q(s, pi(s)) / E[sigma_Q],
+#   g is decreasing: high sigma_rel -> g < 1 (more conservative),
+#                    low  sigma_rel -> g > 1 (more optimistic).
+#
+# This mirrors the TD3+BC sigma_Q scaling of lambda, but for the
+# IQL policy temperature instead of the TD3+BC Q-weight.
+
 import argparse
 import numpy as np
 import torch
@@ -68,24 +84,32 @@ def main(env_name="hopper-medium-replay-v2",
          tau=0.7,
          beta=3.0,
          v_tau_ema=0.005,
-         unc_alpha=1.0,
-         unc_min=0.1,
+         # uncertainty scaling hyperparams (sigma_Q-based)
+         unc_alpha=1.0,      # α_uq: how strongly uncertainty changes beta
+         w_min=0.5,          # clamp range for g(σ_rel)
+         w_max=2.0,
          critic_lr=3e-4,
          v_lr=3e-4,
          actor_lr=3e-4):
 
     """
-    IQL-UA:
+    IQL-UA (sigma_Q version):
       - Q: CriticEnsemble with K heads
       - V: expectile regression to ensemble-mean Q(s,a)
-      - Policy: advantage-weighted regression with IQL weights * uncertainty penalty
-        uncertainty = ensemble std of Q(s, pi(s));
-        penalty = exp(-unc_alpha * std), clamped to [unc_min, 1].
+      - Policy: advantage-weighted regression where the temperature beta is
+        scaled per-state by a monotone function of ensemble std Q(s, pi(s)).
+
+      sigma_Q(s) = std_k Q_k(s, pi(s))
+      sigma_rel(s) = sigma_Q(s) / E[sigma_Q]
+      g(sigma_rel) = exp(-unc_alpha * (sigma_rel - 1)) in [w_min, w_max]
+      beta_eff(s) = beta * g(sigma_rel)
+      weights(s,a) = exp(beta_eff(s) * norm_adv(s,a))
     """
+
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
 
-    # ----- load + normalize data (same pattern as train_td3bc_u.py) -----
+    # ----- load + normalize data -----
     S = data["S"].astype(np.float32)
     A = data["A"].astype(np.float32)
     Rp = data.get("rewards", None)
@@ -115,6 +139,7 @@ def main(env_name="hopper-medium-replay-v2",
         device = "mps"
     else:
         device = "cpu"
+
     # ----- networks -----
     critics = CriticEnsemble(obs_dim, act_dim, K=K).to(device)
     v = VNetwork(obs_dim).to(device)
@@ -144,6 +169,11 @@ def main(env_name="hopper-medium-replay-v2",
                 p_t.data.mul_(1.0 - v_tau_ema)
                 p_t.data.add_(v_tau_ema * p.data)
 
+    # logging helpers
+    beta_eff_mean_val = torch.tensor(beta, device=device)
+    g_mean_val = torch.tensor(1.0, device=device)
+    sigma_q_mean_val = torch.tensor(0.0, device=device)
+
     # ----- training loop -----
     for t in range(1, steps + 1):
         idx = make_batch_indices(N, bs, rng)
@@ -170,7 +200,6 @@ def main(env_name="hopper-medium-replay-v2",
             target = r + gamma * (1.0 - d) * v_s2  # [B]
 
         Q_all = critics.forward(s, a, keepdim=True).squeeze(-1)  # [K, B]
-        # square error for each head vs shared target
         td_err = Q_all.transpose(0, 1) - target.unsqueeze(-1)    # [B, K]
         critic_loss = 0.5 * (td_err.pow(2).mean())
 
@@ -178,7 +207,7 @@ def main(env_name="hopper-medium-replay-v2",
         critic_loss.backward()
         crt_opt.step()
 
-        # 3) Policy update: advantage-weighted regression + uncertainty attenuation
+        # 3) Policy update: advantage-weighted regression with sigma_Q-scaled beta
         with torch.no_grad():
             pi_s = pi(s)
             Q_pi_all = critics.forward(s, pi_s, keepdim=False)  # [B, K]
@@ -192,14 +221,18 @@ def main(env_name="hopper-medium-replay-v2",
             adv_std  = adv.std() + 1e-6
             norm_adv = (adv - adv_mean) / adv_std
 
-            # IQL-style advantage weights
-            awac_weights = torch.exp(beta * norm_adv)
+            # relative uncertainty (dimensionless)
+            sigma_q_mean = Q_pi_std.mean()
+            sigma_rel = Q_pi_std / (sigma_q_mean + 1e-8)
 
-            # uncertainty penalty: higher std => smaller factor (more conservative)
-            unc_factor = torch.exp(-unc_alpha * Q_pi_std)
-            unc_factor = torch.clamp(unc_factor, min=unc_min, max=1.0)
+            # g(σ_rel): >1 when σ_rel < 1, <1 when σ_rel > 1
+            g = torch.exp(-unc_alpha * (sigma_rel - 1.0))
+            g = torch.clamp(g, min=w_min, max=w_max)
 
-            weights = (awac_weights * unc_factor).clamp(max=100.0)
+            beta_eff = beta * g   # [B]
+
+            # IQL-style advantage weights with sigma_Q-scaled beta
+            weights = torch.exp(beta_eff * norm_adv).clamp(max=100.0)
 
         pi_s = pi(s)
         mse = (pi_s - a).pow(2).sum(dim=1)   # [B]
@@ -212,20 +245,24 @@ def main(env_name="hopper-medium-replay-v2",
         # 4) soft-update V target
         soft_update_v_target()
 
+        # update logging stats
+        beta_eff_mean_val = beta_eff.mean().detach()
+        g_mean_val = g.mean().detach()
+        sigma_q_mean_val = sigma_q_mean.detach()
+
         if t % 1000 == 0:
             with torch.no_grad():
                 pi_train = pi(S_t[:4096])
                 Q_mean_log = critics.forward(S_t[:4096], pi_train, keepdim=False).mean().item()
-                uq_mean = Q_pi_std.mean().item()
-                w_mean  = weights.mean().item()
             print(
                 f"[{t}/{steps}] "
                 f"critic_loss={critic_loss.item():.4f} "
                 f"v_loss={v_loss.item():.4f} "
                 f"pi_loss={pi_loss.item():.4f} "
                 f"Q_mean@pi={Q_mean_log:.3f} "
-                f"std_Q@pi={uq_mean:.3f} "
-                f"w_mean={w_mean:.3f}"
+                f"sigma_Q_mean={sigma_q_mean_val.item():.3f} "
+                f"beta_eff_mean={beta_eff_mean_val.item():.3f} "
+                f"g_mean={g_mean_val.item():.3f}"
             )
 
     # ----- save checkpoint -----
@@ -233,7 +270,7 @@ def main(env_name="hopper-medium-replay-v2",
         "env_name": env_name,
         "seed": seed,
         "K": K,
-        "actor": pi.state_dict(),      # keep key name 'actor' for consistency w/ td3bc_u
+        "actor": pi.state_dict(),
         "critics": critics.state_dict(),
         "v": v.state_dict(),
         "s_mean": s_mean,
@@ -244,18 +281,18 @@ def main(env_name="hopper-medium-replay-v2",
             beta=beta,
             v_tau_ema=v_tau_ema,
             unc_alpha=unc_alpha,
-            unc_min=unc_min,
+            w_min=w_min,
+            w_max=w_max,
             critic_lr=critic_lr,
             v_lr=v_lr,
             actor_lr=actor_lr,
             steps=steps,
             bs=bs,
         ),
-        "algo": "iql_u",
+        "algo": "iql_u_sigmaQ",   # distinguish in metadata; filename still starts with iql_u_
     }
 
     # encode unc_alpha in the filename so different alphas don't overwrite each other
-    # e.g. unc_alpha=1.0 -> "alpha1", unc_alpha=0.3 -> "alpha0.3"
     alpha_str = f"{unc_alpha}".rstrip("0").rstrip(".")  # 1.0 -> "1", 0.30 -> "0.3"
     env_slug = env_name.replace("-", "_")
     out_stem = f"iql_u_alpha{alpha_str}_{env_slug}_seed{seed}"
@@ -277,7 +314,8 @@ if __name__ == "__main__":
     p.add_argument("--beta", type=float, default=3.0)
     p.add_argument("--v_tau_ema", type=float, default=0.005)
     p.add_argument("--unc_alpha", type=float, default=1.0)
-    p.add_argument("--unc_min", type=float, default=0.1)
+    p.add_argument("--w_min", type=float, default=0.5)
+    p.add_argument("--w_max", type=float, default=2.0)
     p.add_argument("--critic_lr", type=float, default=3e-4)
     p.add_argument("--v_lr", type=float, default=3e-4)
     p.add_argument("--actor_lr", type=float, default=3e-4)
@@ -294,7 +332,8 @@ if __name__ == "__main__":
         beta=args.beta,
         v_tau_ema=args.v_tau_ema,
         unc_alpha=args.unc_alpha,
-        unc_min=args.unc_min,
+        w_min=args.w_min,
+        w_max=args.w_max,
         critic_lr=args.critic_lr,
         v_lr=args.v_lr,
         actor_lr=args.actor_lr,

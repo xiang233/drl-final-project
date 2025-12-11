@@ -15,6 +15,21 @@ This will:
       results/suite_results.csv
       results/suite_results_summary.csv
       results/suite_results_summary.md
+
+Representative rule for *-u* methods (IQL-U / TD3BC-U):
+
+  For methods in {iql_u, iql_u_mcdo, td3bc_u, td3bc_u_mcdo}, per (env, method):
+
+    1) If there is at least one ckpt whose filename has no "_alpha"
+       substring (e.g., "td3bc_u_antmaze_umaze_v2_seed0.pt"),
+       keep ONLY those "plain" -u files and drop any *_alpha* ones.
+
+    2) If there are no such plain files, then keep only runs with
+       cfg["unc_alpha"] ~= 1.0 and drop others. Those α≈1 runs
+       become the representative -u results.
+
+We also restrict to a baseline method whitelist and drop ablation-only
+methods (like td3bc_u_pessimistic_...).
 """
 
 import argparse
@@ -47,10 +62,10 @@ def infer_method_from_name(stem: str) -> str:
       'td3bc_hopper_medium_replay_v2_seed0'              -> 'td3bc'
       'td3bc_u_hopper_medium_replay_v2_seed0'            -> 'td3bc_u'
       'td3bc_u_mcdo_hopper_medium_replay_v2_seed0'       -> 'td3bc_u_mcdo'
-      'td3bc_u_pessimist0_hopper_medium_replay_v2_seed0' -> 'td3bc_u_pessimistic_alpha0.0'
-      'td3bc_u_pessimist0.3_hopper_medium_replay_v2...'  -> 'td3bc_u_pessimistic_alpha0.3'
-      'td3bc_u_pessimist0.5_hopper_medium_replay_v2...'  -> 'td3bc_u_pessimistic_alpha0.5'
-      'td3bc_u_pessimist1_hopper_medium_replay_v2...'    -> 'td3bc_u_pessimistic_alpha1.0'
+
+    NOTE: *_alpha* or old *_pessimist* variants are treated generically;
+    ablation-specific methods (e.g., td3bc_u_pessimistic_...) will be
+    filtered out later via a method whitelist.
     """
     # BC
     if stem.startswith("bc_"):
@@ -68,21 +83,9 @@ def infer_method_from_name(stem: str) -> str:
     if stem.startswith("td3bc_u_mcdo_"):
         return "td3bc_u_mcdo"
 
-    # TD3BC-U pessimistic ablations (alpha encoded in name)
-    if stem.startswith("td3bc_u_pessimist0.3_"):
-        return "td3bc_u_pessimistic_alpha0.3"
-    if stem.startswith("td3bc_u_pessimist0.5_"):
-        return "td3bc_u_pessimistic_alpha0.5"
-    if stem.startswith("td3bc_u_pessimist1_"):
-        return "td3bc_u_pessimistic_alpha1.0"
-    if stem.startswith("td3bc_u_pessimist0_"):
-        return "td3bc_u_pessimistic_alpha0.0"
-
-    # Generic TD3BC-U (non-pessimist)
     if stem.startswith("td3bc_u_"):
         return "td3bc_u"
 
-    # Plain TD3BC
     if stem.startswith("td3bc_"):
         return "td3bc"
 
@@ -159,7 +162,6 @@ def agg(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate per-(env, method, seed) rows into per-(env, method) stats.
     """
-    # Drop exact duplicates so repeated runs don't double-count
     df = df.drop_duplicates(subset=["env", "seed", "method", "ckpt"])
     g = (
         df.groupby(["env", "method"], dropna=False)[AGG_COLS]
@@ -205,6 +207,19 @@ def to_markdown(out_df: pd.DataFrame) -> str:
 
 # -------------------- main collection logic -------------------- #
 
+BASELINE_METHODS = {
+    "bc",
+    "iql",
+    "iql_u",
+    "iql_u_mcdo",
+    "td3bc",
+    "td3bc_u",
+    "td3bc_u_mcdo",
+}
+
+U_FAMILY = {"iql_u", "iql_u_mcdo", "td3bc_u", "td3bc_u_mcdo"}
+
+
 def collect_for_ckpt(
     ckpt_path: str,
     fqe_iters: int,
@@ -216,11 +231,11 @@ def collect_for_ckpt(
       - load metadata (env_name, seed, algo/method)
       - compute FQE
       - load OOD npz stats
-    Returns a dict row for the CSV.
+    Returns a dict row for the CSV, including some extra fields used for
+    representative selection (has_alpha_in_name, unc_alpha).
     """
     stem = osp.splitext(osp.basename(ckpt_path))[0]
 
-    # Load checkpoint metadata
     try:
         state = torch.load(ckpt_path, map_location="cpu")
     except Exception as e:
@@ -230,12 +245,12 @@ def collect_for_ckpt(
     env_name = state.get("env_name", None)
     seed_ckpt = state.get("seed", None)
     algo = state.get("algo", None)
+    cfg = state.get("cfg", {})
 
     if env_name is None:
         print(f"[WARN] {ckpt_path} missing 'env_name'; skipping.")
         return None
 
-    # Method: first infer from filename (handles ablations), then fall back to algo
     method = infer_method_from_name(stem)
     if method == "unknown" and algo is not None:
         method = algo
@@ -251,7 +266,16 @@ def collect_for_ckpt(
         print(f"[WARN] Could not infer seed for {ckpt_path}; skipping.")
         return None
 
-    # --- FQE: recompute using estimate_return utilities ---
+    # Additional metadata for selection
+    has_alpha_in_name = ("_alpha" in stem)
+    unc_alpha = None
+    if isinstance(cfg, dict) and "unc_alpha" in cfg:
+        try:
+            unc_alpha = float(cfg["unc_alpha"])
+        except Exception:
+            unc_alpha = None
+
+    # FQE eval
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -262,7 +286,7 @@ def collect_for_ckpt(
     pi = load_policy(ckpt_path, s_dim, a_dim, device)
     fqe = fqe_evaluate(pi, data, iters=fqe_iters, device=device)
 
-    # --- OOD: read npz and compute stats ---
+    # OOD stats
     ood_npz_path = find_ood_npz(stem, env_name, pt_dir, ood_subdir=ood_subdir)
     ood_stats = ood_stats_from_npz(ood_npz_path)
 
@@ -272,9 +296,69 @@ def collect_for_ckpt(
         "seed": int(seed),
         "ckpt": ckpt_path,
         "fqe": float(fqe),
+        "has_alpha_in_name": bool(has_alpha_in_name),
+        "unc_alpha": np.nan if unc_alpha is None else float(unc_alpha),
         **ood_stats,
     }
     return row
+
+
+def apply_u_family_selection(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Implement your representative rule for *-u* methods:
+
+      For each (env, method) with method in U_FAMILY:
+
+        1) If there exists at least one row with has_alpha_in_name == False,
+           keep ONLY those rows and drop rows with has_alpha_in_name == True.
+
+        2) Otherwise (no plain rows), keep only rows with unc_alpha ~= 1.0
+           and drop others.
+
+    Other methods are left unchanged.
+    """
+    df = df.copy()
+
+    # Only operate on rows where method is one of the *-u families
+    for env in df["env"].unique():
+        for m in U_FAMILY:
+            mask = (df["env"] == env) & (df["method"] == m)
+            if not mask.any():
+                continue
+
+            sub = df[mask]
+            plain_mask = mask & (~df["has_alpha_in_name"])
+
+            if plain_mask.any():
+                # Use only plain -u files for this env+method
+                drop_mask = mask & (~plain_mask)
+                if drop_mask.any():
+                    print(
+                        f"[INFO] For env='{env}', method='{m}': "
+                        f"found plain -u ckpts; dropping {drop_mask.sum()} *_alpha* rows."
+                    )
+                df = df[~drop_mask]
+            else:
+                # No plain -u filenames; fall back to unc_alpha ~= 1.0
+                alpha_vals = sub["unc_alpha"]
+                keep_mask = mask & (alpha_vals.sub(1.0).abs() <= 1e-6)
+                drop_mask = mask & (~keep_mask)
+
+                if keep_mask.any():
+                    print(
+                        f"[INFO] For env='{env}', method='{m}': "
+                        f"no plain -u ckpts; keeping {keep_mask.sum()} rows "
+                        f"with unc_alpha≈1.0 and dropping {drop_mask.sum()} others."
+                    )
+                    df = df[~drop_mask]
+                else:
+                    # No alpha ≈ 1.0 either; leave them as-is but warn.
+                    print(
+                        f"[WARN] For env='{env}', method='{m}': "
+                        f"no plain -u and no unc_alpha≈1.0; keeping all {sub.shape[0]} rows."
+                    )
+
+    return df
 
 
 def main():
@@ -317,11 +401,19 @@ def main():
 
     df = pd.DataFrame(rows)
 
-    # Optional: env filter (handy when you just ran antmaze)
+    # Optional: env filter (useful when you only care about antmaze now)
     if args.env_filter is not None:
         before = len(df)
         df = df[df["env"].str.contains(args.env_filter)]
         print(f"[INFO] Filtered env by '{args.env_filter}': {before} -> {len(df)} rows")
+
+    # Drop non-baseline methods (e.g., td3bc_u_pessimistic, etc.)
+    before = len(df)
+    df = df[df["method"].isin(BASELINE_METHODS)]
+    print(f"[INFO] Baseline-method filter: {before} -> {len(df)} rows")
+
+    # Apply the *-u representative rule
+    df = apply_u_family_selection(df)
 
     os.makedirs(results_dir, exist_ok=True)
 
