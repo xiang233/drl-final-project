@@ -8,6 +8,7 @@ import torch.optim as optim
 
 from ua.datasets import load_d4rl
 from ua.utils import set_seed
+from ua.nets import CriticEnsemble  # NEW: for loading critic ensembles
 
 
 # --------- Basic networks (match training architectures) ---------
@@ -44,25 +45,31 @@ class PolicyNetwork(nn.Module):
 
 # --------- Policy loader that handles all algos ---------
 
-def load_policy(path, s_dim, a_dim, device):
+def load_policy(path, s_dim, a_dim, device, return_critics: bool = False):
     """
     Load a policy from a checkpoint, handling:
       - BC:                  {'model': MLP.state_dict(), 'algo': 'bc' or no 'algo'}
-      - TD3BC-U (+ variants):{'actor': Actor.state_dict(), 'algo': 'td3bc_u' / 'td3bc_u_pessimistic' / 'td3bc_u_pessimistic_mcdo'}
-      - IQL:                 {'model': PolicyNetwork.state_dict(), 'algo': 'iql'}
-      - IQL-U (+ mcdo):      {'actor': PolicyNetwork.state_dict(), 'algo': 'iql_u' / 'iql_u_mcdo'}
-    Falls back to MLP if algo is unknown but we find 'model' or 'actor'.
+      - TD3BC / TD3BC-U:     {'actor': Actor.state_dict(), 'critics': ..., 'K': ..., 'algo': 'td3bc' / 'td3bc_u' / ...}
+      - IQL:                 {'model': PolicyNetwork.state_dict(), 'critics': ..., 'K': ..., 'algo': 'iql'}
+      - IQL-U (+ variants):  {'actor': PolicyNetwork.state_dict(), 'critics': ..., 'K': ..., 'algo': 'iql_u' / 'iql_u_mcdo' / ...}
+
+    If return_critics=True:
+      returns (pi, critics_or_None)
+    otherwise:
+      returns pi
     """
     state = torch.load(path, map_location=device)
     algo = state.get("algo", None)
 
-    # ---- IQL / IQL-U / IQL-U-MCDO ----
+    critics = None  # default
+
+    # ---- IQL / IQL-U / IQL-U-MCDO / IQL-UA variants ----
     # Unify all these as the same deterministic PolicyNetwork architecture.
-    if algo in ("iql", "iql_u", "iql_u_mcdo"):
+    if algo is not None and algo.startswith("iql"):
         pi = PolicyNetwork(s_dim, a_dim).to(device)
         # In our code:
-        #   - plain IQL saves under 'model'
-        #   - IQL-U / IQL-U-MCDO save under 'actor'
+        #   - plain IQL may save under 'model'
+        #   - IQL-U / variants save under 'actor'
         actor_sd = state.get("actor") or state.get("model")
         if actor_sd is None:
             raise KeyError(
@@ -71,12 +78,24 @@ def load_policy(path, s_dim, a_dim, device):
             )
         pi.load_state_dict(actor_sd, strict=True)
         pi.eval()
+
+        # optional critic ensemble (for σ_Q gating etc.)
+        if return_critics and ("critics" in state) and ("K" in state):
+            K = state["K"]
+            critics = CriticEnsemble(s_dim, a_dim, K=K).to(device)
+            critics.load_state_dict(state["critics"], strict=True)
+            critics.eval()
+
+        if return_critics:
+            return pi, critics
         return pi
 
-    # ---- TD3BC-U (+ pessimistic + mcdo variants) ----
-    # TD3BC-U checkpoints look like:
-    #   {"actor": ..., "critics": ..., "K": ..., "env_name": ..., "seed": ..., "cfg": {...}}
-    if algo in ("td3bc_u", "td3bc_u_pessimistic", "td3bc_u_pessimistic_mcdo") or (
+    # ---- TD3BC / TD3BC-U (+ pessimistic + mcdo variants) ----
+    # TD3BC-like checkpoints look like:
+    #   {"actor": ..., "critics": ..., "K": ..., "env_name": ..., "seed": ..., "cfg": {...}, "algo": "td3bc" / "td3bc_u"...}
+    if (
+        algo is not None and algo.startswith("td3bc")
+    ) or (
         "actor" in state and "critics" in state and "K" in state and "v" not in state
     ):
         try:
@@ -84,18 +103,26 @@ def load_policy(path, s_dim, a_dim, device):
         except ImportError as e:
             raise ImportError(
                 "Could not import Actor from ua.nets; "
-                "this is required to load TD3BC-U policies."
+                "this is required to load TD3BC(-U) policies."
             ) from e
 
         pi = Actor(s_dim, a_dim).to(device)
         actor_sd = state.get("actor")
         if actor_sd is None:
             raise KeyError(
-                f"Expected 'actor' key in TD3BC-U-like checkpoint {path}, "
+                f"Expected 'actor' key in TD3BC-like checkpoint {path}, "
                 f"found keys: {list(state.keys())}"
             )
         pi.load_state_dict(actor_sd, strict=True)
         pi.eval()
+
+        if return_critics:
+            if ("critics" in state) and ("K" in state):
+                K = state["K"]
+                critics = CriticEnsemble(s_dim, a_dim, K=K).to(device)
+                critics.load_state_dict(state["critics"], strict=True)
+                critics.eval()
+            return pi, critics
         return pi
 
     # ---- BC (behavior cloning) ----
@@ -104,6 +131,8 @@ def load_policy(path, s_dim, a_dim, device):
         pi = MLP(s_dim, a_dim).to(device)
         pi.load_state_dict(state["model"], strict=True)
         pi.eval()
+        if return_critics:
+            return pi, None
         return pi
 
     # ---- Fallback ----
@@ -127,7 +156,52 @@ def load_policy(path, s_dim, a_dim, device):
     pi = MLP(s_dim, a_dim).to(device)
     pi.load_state_dict(state[key], strict=False)
     pi.eval()
+    if return_critics:
+        return pi, None
     return pi
+
+
+# --------- Post-hoc σ_Q-based safe action (Option 1) ---------
+
+@torch.no_grad()
+def safe_action_from_dataset(
+    pi: nn.Module,
+    critics: CriticEnsemble | None,
+    s_batch: torch.Tensor,
+    a_beh_batch: torch.Tensor,
+    sigma_low: float = 0.5,
+    sigma_high: float = 2.0,
+) -> torch.Tensor:
+    """
+    Post-hoc σ_Q-based blending between policy and behavior actions.
+
+    If critics is None, this just returns pi(s_batch).
+
+    Inputs:
+      pi          : policy network, pi(s) -> [B, act_dim]
+      critics     : CriticEnsemble or None
+      s_batch     : [B, obs_dim] states
+      a_beh_batch : [B, act_dim] dataset (behavior) actions aligned with s_batch
+      sigma_low   : below this, trust π(s) fully (gate ~ 1)
+      sigma_high  : above this, trust π(s) minimally (gate ~ 0)
+
+    Returns:
+      a_safe      : [B, act_dim] blended action.
+    """
+    if critics is None:
+        return pi(s_batch)
+
+    a_pi = pi(s_batch)  # [B, act_dim]
+
+    Q_all = critics.forward(s_batch, a_pi, keepdim=False)  # [B,K]
+    sigma = Q_all.std(dim=1, unbiased=False)               # [B]
+
+    # Linear gate: sigma_low -> 1.0, sigma_high -> 0.0
+    gate = (sigma_high - sigma) / (sigma_high - sigma_low + 1e-8)
+    gate = torch.clamp(gate, 0.0, 1.0)                     # [B]
+
+    a_safe = gate.unsqueeze(-1) * a_pi + (1.0 - gate).unsqueeze(-1) * a_beh_batch
+    return a_safe
 
 
 # --------- FQE implementation ---------
@@ -138,7 +212,32 @@ class QMLP(MLP):
         super().__init__(din, 1, hid)
 
 
-def fqe_evaluate(pi, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device=None):
+def fqe_evaluate(
+    pi,
+    data,
+    gamma=0.99,
+    iters=20000,
+    bs=1024,
+    lr=3e-4,
+    device=None,
+    critics: CriticEnsemble | None = None,
+    use_sigma_gate: bool = False,
+    sigma_low: float = 0.5,
+    sigma_high: float = 2.0,
+):
+    """
+    Fitted Q Evaluation (FQE).
+
+    By default (use_sigma_gate=False), this is identical to the original:
+      - train q(s,a) on dataset transitions with targets using π(s')
+      - report mean q(s, π(s)) over dataset states.
+
+    If use_sigma_gate=True and critics is not None:
+      - training is unchanged
+      - final evaluation uses a blended action:
+          a_eval = safe_action_from_dataset(pi, critics, s, a_beh)
+        so v_hat = E_s[ q(s, a_eval) ].
+    """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     needed = ["S", "A", "S_next", "rewards", "terminals", "s_mean", "s_std"]
@@ -188,7 +287,7 @@ def fqe_evaluate(pi, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device=Non
         )
 
         with torch.no_grad():
-            a_pi_sp = pi(sp)
+            a_pi_sp = pi(sp)  # NOTE: training uses raw π(s'), no gating
             q_sp = q(torch.cat([sp, a_pi_sp], dim=-1))
             tgt = r + gamma * (1.0 - d) * q_sp
 
@@ -206,8 +305,20 @@ def fqe_evaluate(pi, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device=Non
     q.eval()
     with torch.no_grad():
         s_all = torch.from_numpy(Sz).to(device)
-        a_all = pi(s_all)
-        v_hat = q(torch.cat([s_all, a_all], dim=-1)).mean().item()
+        if use_sigma_gate and critics is not None:
+            a_beh = torch.from_numpy(A).to(device)
+            a_eval = safe_action_from_dataset(
+                pi=pi,
+                critics=critics,
+                s_batch=s_all,
+                a_beh_batch=a_beh,
+                sigma_low=sigma_low,
+                sigma_high=sigma_high,
+            )
+        else:
+            a_eval = pi(s_all)
+
+        v_hat = q(torch.cat([s_all, a_eval], dim=-1)).mean().item()
     return v_hat
 
 
@@ -226,6 +337,8 @@ def infer_method_from_state_or_name(state, ckpt_path):
         return "bc"
     if stem.startswith("td3bc_u_"):
         return "td3bc_u"
+    if stem.startswith("td3bc_"):
+        return "td3bc"
     if stem.startswith("iql_u_mcdo_"):
         return "iql_u_mcdo"
     if stem.startswith("iql_u_"):
@@ -261,6 +374,15 @@ if __name__ == "__main__":
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--iters", type=int, default=20000)
     ap.add_argument("--csv", type=str, default="", help="Optional CSV path to append FQE result")
+
+    # NEW: σ_Q gate options
+    ap.add_argument("--use_sigma_gate", action="store_true",
+                    help="If set, use σ_Q-based safe action for FQE evaluation (requires critics in ckpt).")
+    ap.add_argument("--sigma_low", type=float, default=0.5,
+                    help="σ_Q below this: trust policy fully (gate≈1).")
+    ap.add_argument("--sigma_high", type=float, default=2.0,
+                    help="σ_Q above this: trust policy minimally (gate≈0).")
+
     args = ap.parse_args()
 
     # Load checkpoint metadata first so we can infer env/method/seed
@@ -276,8 +398,22 @@ if __name__ == "__main__":
     s_dim = data["S"].shape[1]
     a_dim = data["A"].shape[1]
 
-    pi = load_policy(args.ckpt, s_dim, a_dim, device)
-    ret = fqe_evaluate(pi, data, iters=args.iters, device=device)
+    if args.use_sigma_gate:
+        pi, critics = load_policy(args.ckpt, s_dim, a_dim, device, return_critics=True)
+    else:
+        pi = load_policy(args.ckpt, s_dim, a_dim, device, return_critics=False)
+        critics = None
+
+    ret = fqe_evaluate(
+        pi,
+        data,
+        iters=args.iters,
+        device=device,
+        critics=critics,
+        use_sigma_gate=args.use_sigma_gate,
+        sigma_low=args.sigma_low,
+        sigma_high=args.sigma_high,
+    )
 
     print(f"FQE estimated return for {args.ckpt} on {env_name}: {ret:.3f}")
 

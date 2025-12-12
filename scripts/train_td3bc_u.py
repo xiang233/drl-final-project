@@ -1,18 +1,18 @@
-# scripts/train_td3bc_u.py
+# scripts/train_td3bc_u_conf.py
 #
-# TD3+BC with sigma_Q-based scaling of the Q term (uncertainty-aware TD3+BC).
+# Confidence-Weighted TD3+BC.
 #
 # Actor loss:
-#   L_pi = - E[ λ_eff(s) * Q(s, π(s)) - ||π(s) - a||^2 ]
+#   L_pi = - E[ λ_conf(s) * Q(s, π(s)) - ||π(s) - a||^2 ]
 #
 # where:
-#   λ_base = base_w / E_s[ |Q(s, a_dataset)| ]   (TD3+BC normalization)
-#   λ_eff(s) = λ_base * g(σ_Q(s, π(s)))
-#   g is a decreasing function of relative uncertainty:
-#       high σ_Q -> g < 1  (more conservative, closer to BC)
-#       low  σ_Q -> g > 1  (more optimistic)
+#   λ_base = base_w / E_s[ |Q(s, a_dataset)| ]   (Standard TD3+BC normalization)
+#   w_conf(σ) = 1 / (1 + β * σ_Q)                 (Inverse Variance Weighting)
+#   λ_conf(s) = λ_base * w_conf(σ)
 #
-# This avoids training a TempNet and keeps the optimization well behaved.
+# Mechanism:
+#   - High Uncertainty (AntMaze) -> w_conf -> 0 -> λ_conf -> 0 -> Pure BC (Safety)
+#   - Low Uncertainty (Walker2d) -> w_conf -> 1 -> λ_conf -> λ_base -> Full Exploitation
 
 import argparse
 import numpy as np
@@ -36,10 +36,9 @@ def main(env_name="hopper-medium-replay-v2",
          K=4,
          gamma=0.99,
          tau=0.005,
-         base_w=2.5,        # TD3+BC α: λ_base = base_w / E|Q|
-         alpha_uq=1.0,      # strength of uncertainty scaling on λ
-         w_min=0.5,         # clamp range for g(σ_Q)
-         w_max=2.0,
+         base_w=2.5,        # TD3+BC base weight
+         beta_uq=5.0,       # Sensitivity to uncertainty (Higher = Stronger filtering)
+         w_min=0.05,        # Minimum trust (prevents total collapse of Q-signal)
          actor_lr=3e-4,
          critic_lr=3e-4,
          policy_delay=2,
@@ -57,7 +56,7 @@ def main(env_name="hopper-medium-replay-v2",
     timeouts  = data.get("timeouts", None)
 
     if Rp is None or Sn is None:
-        raise ValueError("Dataset missing rewards or next states; required for TD3-style training.")
+        raise ValueError("Dataset missing rewards or next states; required for training.")
     if terminals is None:
         terminals = np.zeros((S.shape[0],), dtype=np.float32)
     if timeouts is None:
@@ -101,8 +100,8 @@ def main(env_name="hopper-medium-replay-v2",
 
     # logging placeholders
     lam_base_val = torch.tensor(base_w, device=device)
-    lam_eff_mean_val = torch.tensor(base_w, device=device)
-    g_mean_val = torch.tensor(1.0, device=device)
+    lam_conf_mean_val = torch.tensor(base_w, device=device)
+    w_conf_mean_val = torch.tensor(1.0, device=device)
 
     for t in range(1, steps + 1):
         idx = make_batch_indices(N, bs, rng)
@@ -135,33 +134,32 @@ def main(env_name="hopper-medium-replay-v2",
             s_detach = s
             pi_s = actor(s_detach)  # [B, act_dim]
 
-            # Q(s, π(s)) + ensemble std (with grad)
+            # 1. Get Q-values and absolute uncertainty
             Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
             Q_pi_mean = Q_pi_all.mean(dim=1)                           # [B]
-            sigma_q = Q_pi_all.std(dim=1)                              # [B]
+            sigma_q = Q_pi_all.std(dim=1, unbiased=False)              # [B]
 
-            # TD3+BC base lambda from dataset Q(s, a)
+            # 2. Calculate Standard TD3+BC Lambda (Base Trust)
             with torch.no_grad():
-                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  # [B]
+                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)
                 Q_mean_abs = Q_bc.abs().mean()
                 lam_base = base_w / (Q_mean_abs + 1e-8)
 
-                # relative uncertainty
-                sigma_mean = sigma_q.mean()
-                sigma_rel = sigma_q / (sigma_mean + 1e-8)  # dimensionless
+                # 3. Calculate Confidence Weight (Inverse Variance)
+                # w_conf = 1 / (1 + beta * sigma)
+                # This has NO dependency on batch means. High sigma -> Low weight always.
+                w_conf = 1.0 / (1.0 + beta_uq * sigma_q)
+                
+                # Optional: Clamp to ensure minimal Q-signal remains (e.g. 5%)
+                w_conf = torch.clamp(w_conf, min=w_min, max=1.0)
 
-                # g(σ_rel): >1 when σ_rel < 1, <1 when σ_rel > 1
-                #   g = exp(-α (σ_rel - 1)), then clamp
-                g = torch.exp(-alpha_uq * (sigma_rel - 1.0))
-                g = torch.clamp(g, min=w_min, max=w_max)
+                # 4. Effective Lambda
+                lam_conf = lam_base * w_conf  # [B]
 
-                lam_eff = lam_base * g  # [B]
-
-            # BC term
-            bc_term = ((pi_s - a) ** 2).sum(dim=1)  # [B]
-
-            # actor loss: per-sample λ_eff
-            actor_loss = -(lam_eff * Q_pi_mean - bc_term).mean()
+            # 5. Actor Loss
+            # Maximize (lam_conf * Q) - BC
+            bc_term = ((pi_s - a) ** 2).sum(dim=1)
+            actor_loss = -(lam_conf * Q_pi_mean - bc_term).mean()
 
             act_opt.zero_grad()
             actor_loss.backward()
@@ -173,8 +171,8 @@ def main(env_name="hopper-medium-replay-v2",
 
             # logging
             lam_base_val = lam_base.detach()
-            lam_eff_mean_val = lam_eff.mean().detach()
-            g_mean_val = g.mean().detach()
+            lam_conf_mean_val = lam_conf.mean().detach()
+            w_conf_mean_val = w_conf.mean().detach()
 
         # ---------- Logging ----------
         if t % 1000 == 0:
@@ -186,9 +184,9 @@ def main(env_name="hopper-medium-replay-v2",
                 f"[{t}/{steps}] "
                 f"critic_loss={critic_loss.item():.4f} "
                 f"Q_mean@pi={Q_mean_log:.3f} "
-                f"(lambda_base={lam_base_val.item():.4f}, "
-                f"lambda_eff_mean={lam_eff_mean_val.item():.4f}, "
-                f"g_mean={g_mean_val.item():.3f})"
+                f"(lam_base={lam_base_val.item():.4f}, "
+                f"lam_conf_mean={lam_conf_mean_val.item():.4f}, "
+                f"w_conf_mean={w_conf_mean_val.item():.3f})"
             )
 
     # ---------- Save checkpoint ----------
@@ -204,9 +202,8 @@ def main(env_name="hopper-medium-replay-v2",
             gamma=gamma,
             tau=tau,
             base_w=base_w,
-            alpha_uq=alpha_uq,
+            beta_uq=beta_uq,
             w_min=w_min,
-            w_max=w_max,
             actor_lr=actor_lr,
             critic_lr=critic_lr,
             policy_delay=policy_delay,
@@ -215,7 +212,7 @@ def main(env_name="hopper-medium-replay-v2",
             target_noise=target_noise,
             noise_clip=noise_clip,
         ),
-        "algo": "td3bc_u_sigmaQ",   # distinguish in checkpoint; filename still td3bc_u_...
+        "algo": "td3bc_u_conf_weighted",
     }
     out_path = f"td3bc_u_{env_name.replace('-', '_')}_seed{seed}.pt"
     torch.save(out, out_path)
@@ -232,9 +229,11 @@ if __name__ == "__main__":
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--tau", type=float, default=0.005)
     p.add_argument("--base_w", type=float, default=2.5)
-    p.add_argument("--alpha_uq", type=float, default=1.0)
-    p.add_argument("--w_min", type=float, default=0.5)
-    p.add_argument("--w_max", type=float, default=2.0)
+    
+    # Confidence Hyperparameters
+    p.add_argument("--beta_uq", type=float, default=5.0)  # Sensitivity. Try 5.0 or 10.0
+    p.add_argument("--w_min", type=float, default=0.05)   # Min trust. Try 0.05 or 0.1
+    
     p.add_argument("--actor_lr", type=float, default=3e-4)
     p.add_argument("--critic_lr", type=float, default=3e-4)
     p.add_argument("--policy_delay", type=int, default=2)
@@ -251,9 +250,8 @@ if __name__ == "__main__":
         gamma=args.gamma,
         tau=args.tau,
         base_w=args.base_w,
-        alpha_uq=args.alpha_uq,
+        beta_uq=args.beta_uq,
         w_min=args.w_min,
-        w_max=args.w_max,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         policy_delay=args.policy_delay,

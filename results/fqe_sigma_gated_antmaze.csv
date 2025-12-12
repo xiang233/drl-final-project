@@ -1,0 +1,6 @@
+env,method,seed,ckpt,fqe_return
+antmaze-umaze-v2,td3bc,0,td3bc_antmaze_umaze_v2_seed0.pt,0.212998
+antmaze-umaze-v2,iql_u_conf_weighted,0,iql_u_antmaze_umaze_v2_seed0.pt,0.237406
+antmaze-umaze-v2,td3bc,1,td3bc_antmaze_umaze_v2_seed1.pt,0.241625
+antmaze-umaze-v2,iql_u_conf_weighted,1,iql_u_antmaze_umaze_v2_seed1.pt,0.198085
+antmaze-umaze-v2,td3bc,2,td3bc_antmaze_umaze_v2_seed2.pt,0.220498
