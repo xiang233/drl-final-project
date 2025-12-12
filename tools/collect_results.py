@@ -283,8 +283,14 @@ def collect_for_ckpt(
     s_dim = data["S"].shape[1]
     a_dim = data["A"].shape[1]
 
-    pi = load_policy(ckpt_path, s_dim, a_dim, device)
-    fqe = fqe_evaluate(pi, data, iters=fqe_iters, device=device)
+    pi = load_policy(ckpt_path, s_dim, a_dim, device, return_critics=False)
+    fqe = fqe_evaluate(
+        pi, data,
+        iters=fqe_iters,
+        device=device,
+        use_sigma_gate=False,   # force standard FQE
+    )
+
 
     # OOD stats
     ood_npz_path = find_ood_npz(stem, env_name, pt_dir, ood_subdir=ood_subdir)

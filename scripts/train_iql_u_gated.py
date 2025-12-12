@@ -178,7 +178,7 @@ def main(env_name="hopper-medium-replay-v2",
         critic_loss.backward()
         crt_opt.step()
 
-        # ----- 3) Policy update with σ_Q gate -----
+        # policy update with σ_Q gate 
         # NOTE: we recompute pi(s) for policy gradient (no_grad only for weights)
         pi_s = pi(s)                                     # [B, act_dim]
 

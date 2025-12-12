@@ -1,3 +1,4 @@
 env,method,seed,ckpt,fqe_return
 antmaze-umaze-v2,td3bc,0,td3bc_antmaze_umaze_v2_seed0.pt,0.257218
 antmaze-umaze-v2,td3bc,1,td3bc_antmaze_umaze_v2_seed1.pt,0.206156
+antmaze-umaze-v2,td3bc,2,td3bc_antmaze_umaze_v2_seed2.pt,0.256649

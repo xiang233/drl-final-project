@@ -1,0 +1,13 @@
+env,method,seed,ckpt,sigma_source,q_low,q_high,sigma_low,sigma_high,iters,sigma_batch,fqe_return
+antmaze-umaze-v2,td3bc,0,td3bc_antmaze_umaze_v2_seed0.pt,policy,0.100,0.900,0.00299608,0.0371627,20000,50000,0.239415
+antmaze-umaze-v2,td3bc,1,td3bc_antmaze_umaze_v2_seed1.pt,policy,0.100,0.900,0.00327457,0.0386595,20000,50000,0.210053
+antmaze-umaze-v2,td3bc,1,td3bc_antmaze_umaze_v2_seed1.pt,policy,0.100,0.900,0.00327457,0.0386595,20000,50000,0.273275
+hopper-medium-replay-v2,td3bc,0,td3bc_hopper_medium_replay_v2_seed0.pt,policy,0.100,0.900,0.386898,2.07375,20000,50000,95.679680
+hopper-medium-replay-v2,td3bc,1,td3bc_hopper_medium_replay_v2_seed1.pt,policy,0.100,0.900,0.363449,1.97511,20000,50000,107.031403
+hopper-medium-replay-v2,td3bc,2,td3bc_hopper_medium_replay_v2_seed2.pt,policy,0.100,0.900,0.408077,2.07152,20000,50000,110.828552
+walker2d-medium-v2,td3bc,0,td3bc_walker2d_medium_v2_seed0.pt,policy,0.100,0.900,0.240394,1.75928,20000,50000,335.693268
+walker2d-medium-v2,td3bc,1,td3bc_walker2d_medium_v2_seed1.pt,policy,0.100,0.900,0.259666,1.76863,20000,50000,336.949646
+walker2d-medium-v2,td3bc,2,td3bc_walker2d_medium_v2_seed2.pt,policy,0.100,0.900,0.246536,1.76741,20000,50000,357.629395
+antmaze-umaze-v2,td3bc,0,td3bc_antmaze_umaze_v2_seed0.pt,policy,0.100,0.900,0.00299608,0.0371627,20000,50000,0.233229
+antmaze-umaze-v2,td3bc,1,td3bc_antmaze_umaze_v2_seed1.pt,policy,0.100,0.900,0.00327457,0.0386595,20000,50000,0.239593
+antmaze-umaze-v2,td3bc,2,td3bc_antmaze_umaze_v2_seed2.pt,policy,0.100,0.900,0.00295709,0.0391422,20000,50000,0.216332

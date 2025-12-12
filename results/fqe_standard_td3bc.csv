@@ -1,0 +1,10 @@
+env,method,seed,ckpt,fqe_return
+antmaze-umaze-v2,td3bc,0,td3bc_antmaze_umaze_v2_seed0.pt,0.257218
+antmaze-umaze-v2,td3bc,1,td3bc_antmaze_umaze_v2_seed1.pt,0.206156
+antmaze-umaze-v2,td3bc,2,td3bc_antmaze_umaze_v2_seed2.pt,0.256649
+hopper-medium-replay-v2,td3bc,0,td3bc_hopper_medium_replay_v2_seed0.pt,100.148041
+hopper-medium-replay-v2,td3bc,1,td3bc_hopper_medium_replay_v2_seed1.pt,103.927513
+hopper-medium-replay-v2,td3bc,2,td3bc_hopper_medium_replay_v2_seed2.pt,104.869072
+walker2d-medium-v2,td3bc,0,td3bc_walker2d_medium_v2_seed0.pt,336.492371
+walker2d-medium-v2,td3bc,1,td3bc_walker2d_medium_v2_seed1.pt,355.059052
+walker2d-medium-v2,td3bc,2,td3bc_walker2d_medium_v2_seed2.pt,374.438629
