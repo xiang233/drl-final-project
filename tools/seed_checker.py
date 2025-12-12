@@ -1,11 +1,10 @@
-# check_seeds.py
+
 import glob
 import os
 import re
 
 import torch
 
-# pattern like: bc_hopper_medium_replay_v2_seed0.pt
 SEED_RE = re.compile(r"_seed(\d+)\.pt$")
 
 def main():

@@ -1,4 +1,3 @@
-# scripts/measure_ood.py
 import argparse
 import os.path as osp
 
@@ -10,7 +9,7 @@ from sklearn.neighbors import NearestNeighbors
 from ua.datasets import load_d4rl, z_norm_states
 
 
-# ---------- Policy architectures + loader (BC / TD3BC-U / IQL / IQL-U) ----------
+# Policy architectures & loader 
 
 import torch.nn as nn
 
@@ -29,7 +28,6 @@ class MLP(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    """Deterministic tanh policy for IQL/IQL-U."""
     def __init__(self, state_dim, action_dim, hid=256):
         super().__init__()
         self.backbone = MLP(state_dim, action_dim, hid=hid)
@@ -39,17 +37,10 @@ class PolicyNetwork(nn.Module):
 
 
 def load_policy(ckpt_path, s_dim, a_dim, device):
-    """
-    Load policy from checkpoint, handling:
-      - BC:          {'model': MLP.state_dict(), 'algo': 'bc' or no 'algo'}
-      - TD3BC-U:     {'actor': Actor.state_dict(), 'algo': 'td3bc_u'}
-      - IQL:         {'model': PolicyNetwork.state_dict(), 'algo': 'iql'}
-      - IQL-U:       {'actor': PolicyNetwork.state_dict(), 'algo': 'iql_u'}
-    """
     state = torch.load(ckpt_path, map_location=device)
     algo = state.get("algo", None)
 
-    # ---- IQL ----
+    # IQL
     if algo == "iql":
         pi = PolicyNetwork(s_dim, a_dim).to(device)
         actor_sd = state.get("model")
@@ -62,7 +53,7 @@ def load_policy(ckpt_path, s_dim, a_dim, device):
         pi.eval()
         return pi
 
-    # ---- IQL-U ----
+    # IQL-U 
     if algo == "iql_u":
         pi = PolicyNetwork(s_dim, a_dim).to(device)
         actor_sd = state.get("actor") or state.get("model")
@@ -75,7 +66,7 @@ def load_policy(ckpt_path, s_dim, a_dim, device):
         pi.eval()
         return pi
 
-    # ---- TD3BC-U ----
+    # TD3BC-U 
     if algo == "td3bc_u" or (
         "actor" in state and "critics" in state and "K" in state and "v" not in state
     ):
@@ -97,14 +88,14 @@ def load_policy(ckpt_path, s_dim, a_dim, device):
         pi.eval()
         return pi
 
-    # ---- BC (behavior cloning) ----
+    # BC 
     if "model" in state and "q" not in state and "v" not in state:
         pi = MLP(s_dim, a_dim).to(device)
         pi.load_state_dict(state["model"], strict=True)
         pi.eval()
         return pi
 
-    # ---- Fallback ----
+
     key = None
     if "model" in state:
         key = "model"
@@ -126,7 +117,7 @@ def load_policy(ckpt_path, s_dim, a_dim, device):
     return pi
 
 
-# ---------- Main OOD measurement ----------
+# OOD measurement 
 
 def main():
     ap = argparse.ArgumentParser()
@@ -151,12 +142,11 @@ def main():
     _, data = load_d4rl(args.env, args.seed)
     S, A = data["S"], data["A"]
     s_mean, s_std = data["s_mean"], data["s_std"]
-    Sn = z_norm_states(S, s_mean, s_std)  # normalized states
+    Sn = z_norm_states(S, s_mean, s_std) 
 
     N = Sn.shape[0]
     print(f"[measure_ood] Loaded {args.env} with N={N} transitions.")
 
-    # Optional subsampling for speed
     if args.max_samples > 0 and N > args.max_samples:
         rng = np.random.default_rng(args.seed)
         idx = rng.choice(N, size=args.max_samples, replace=False)
@@ -166,30 +156,27 @@ def main():
     else:
         Sn_sub = Sn
         A_sub = A
-        idx = None  # means "no subsampling"
+        idx = None 
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     s_dim, a_dim = S.shape[1], A.shape[1]
     pi = load_policy(args.ckpt, s_dim, a_dim, device)
 
-    # policy actions on all *subsampled* states
     with torch.no_grad():
         s_t = torch.from_numpy(Sn_sub).to(device)
         a_pi = pi(s_t).cpu().numpy().astype(np.float32)
 
-    # kNN in normalized state space
+    # kNN 
     k = max(1, args.kstate)
     print(f"[measure_ood] Fitting NearestNeighbors on {Sn_sub.shape[0]} states (k={k})...")
     nbrs = NearestNeighbors(n_neighbors=k, algorithm="auto", n_jobs=-1).fit(Sn_sub)
     print("[measure_ood] Querying kNN...")
     dists, idxs = nbrs.kneighbors(Sn_sub, return_distance=True)
 
-    # min over neighbors of ||a_pi(s) - a_behavior(s_neighbor)||
-    diffs = a_pi[:, None, :] - A_sub[idxs]           # [N_sub, k, act_dim]
-    act_d = np.linalg.norm(diffs, axis=-1)           # [N_sub, k]
-    min_act_d = act_d.min(axis=1).astype(np.float32) # [N_sub]
+    diffs = a_pi[:, None, :] - A_sub[idxs]           
+    act_d = np.linalg.norm(diffs, axis=-1)           
+    min_act_d = act_d.min(axis=1).astype(np.float32) 
 
-    # stats
     def stat(x):
         return dict(mean=float(x.mean()),
                     p50=float(np.percentile(x, 50)),

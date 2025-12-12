@@ -1,4 +1,3 @@
-# scripts/train_td3bc_u.py  (PESSIMISTIC-Q TD3+BC-UA)
 
 import argparse
 import numpy as np
@@ -22,26 +21,14 @@ def main(env_name="hopper-medium-replay-v2",
          K=4,
          gamma=0.99,
          tau=0.005,
-         base_w=2.5,       # alpha in TD3+BC: lambda = base_w / E|Q|
-         alpha_uq=1.0,     # strength of uncertainty penalty on Q
+         base_w=2.5,       
+         alpha_uq=1.0,    
          actor_lr=3e-4,
          critic_lr=3e-4,
          policy_delay=2,
          target_noise=0.2,
          noise_clip=0.5):
-    """
-    TD3+BC-UA with Pessimistic Q.
-
-    Actor objective:
-        L_pi = - E[ lambda * ( Q(s, pi(s)) - alpha_uq * sigma_Q(s, pi(s)) )
-                     - ||pi(s) - a||^2 ]
-
-    where:
-      - lambda = base_w / E_s[ |Q(s, a_dataset)| ]
-      - sigma_Q is the std across the critic ensemble at (s, pi(s))
-      - BC term is unweighted (no UA on BC), so uncertainty directly
-        penalizes the Q-value instead of rescaling the imitation term.
-    """
+    
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
 
@@ -57,7 +44,6 @@ def main(env_name="hopper-medium-replay-v2",
     if timeouts is None:
         timeouts = np.zeros((S.shape[0],), dtype=np.float32)
 
-    # normalize states
     s_mean, s_std = data["s_mean"], data["s_std"]
     S  = (S  - s_mean) / (s_std + 1e-6)
     Sn = (Sn - s_mean) / (s_std + 1e-6)
@@ -86,14 +72,12 @@ def main(env_name="hopper-medium-replay-v2",
     rng = np.random.default_rng(seed)
     done_mask = np.clip(terminals + timeouts, 0, 1).astype(np.float32)
 
-    # pre-torch tensors
     S_t  = torch.from_numpy(S).to(device)
     A_t  = torch.from_numpy(A).to(device)
     R_t  = torch.from_numpy(Rp.squeeze()).to(device)
     Sn_t = torch.from_numpy(Sn).to(device)
     D_t  = torch.from_numpy(done_mask.squeeze()).to(device)
 
-    # logging placeholders
     lam_val = torch.tensor(base_w, device=device)
     sigma_Q_mean_val = torch.tensor(0.0, device=device)
     Q_pess_mean_val = torch.tensor(0.0, device=device)
@@ -106,66 +90,56 @@ def main(env_name="hopper-medium-replay-v2",
         s2 = Sn_t[idx]
         d  = D_t[idx]
 
-        # ---------- Critic update ----------
+        # Critic update
         with torch.no_grad():
-            # target policy with smoothing (TD3)
             a2 = actor_targ(s2)
             noise = torch.randn_like(a2) * target_noise
             noise = torch.clamp(noise, -noise_clip, noise_clip)
             a2_noisy = torch.clamp(a2 + noise, -1.0, 1.0)
 
-            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  # [K,B,1]
-            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    # [B]
-            y = r + gamma * (1.0 - d) * Qt_min                  # [B]
+            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  
+            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    
+            y = r + gamma * (1.0 - d) * Qt_min                  
 
-        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    # [K,B]
+        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    
         critic_loss = torch.mean((Qs.transpose(0, 1) - y.unsqueeze(-1)) ** 2)
 
         crt_opt.zero_grad()
         critic_loss.backward()
         crt_opt.step()
 
-        # ---------- Actor update (delayed) ----------
+        # Actor update 
         if t % policy_delay == 0:
             s_detach = s
-            pi_s = actor(s_detach)  # [B, act_dim]
+            pi_s = actor(s_detach)  
 
-            # Q(s, pi(s)) with grad
-            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
-            Q_pi_mean = Q_pi_all.mean(dim=1)                           # [B]
+            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  
+            Q_pi_mean = Q_pi_all.mean(dim=1)                          
 
-            # TD3+BC lambda normalization (no grad)
             with torch.no_grad():
-                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  # [B]
+                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  
                 Q_mean_abs = Q_bc.abs().mean()
                 lam = base_w / (Q_mean_abs + 1e-8)
 
-            # Uncertainty signal with grad
-            sigma_Q = Q_pi_all.std(dim=1)  # [B]
+            sigma_Q = Q_pi_all.std(dim=1)  
 
-            # Pessimistic Q
-            Q_pess = Q_pi_mean - alpha_uq * sigma_Q  # [B]
+            Q_pess = Q_pi_mean - alpha_uq * sigma_Q  
 
-            # Plain BC term (no UA weight)
-            bc_term = torch.sum((pi_s - a) ** 2, dim=1)  # [B]
+            bc_term = torch.sum((pi_s - a) ** 2, dim=1)  
 
-            # Actor loss: minimize [ -lambda * Q_pess + ||pi - a||^2 ]
             actor_loss = -(lam * Q_pess - bc_term).mean()
 
             act_opt.zero_grad()
             actor_loss.backward()
             act_opt.step()
 
-            # soft targets
             soft_update_(critics, critics_t, tau)
             soft_update_(actor, actor_targ, tau)
 
-            # update logging scalars
             lam_val = lam.detach()
             sigma_Q_mean_val = sigma_Q.mean().detach()
             Q_pess_mean_val = Q_pess.mean().detach()
 
-        # ---------- Logging ----------
         if t % 1000 == 0:
             with torch.no_grad():
                 pi_train = actor(S_t[:4096])
@@ -180,7 +154,6 @@ def main(env_name="hopper-medium-replay-v2",
                 f"Q_pess={Q_pess_mean_val.item():.3f})"
             )
 
-    # ---------- Save checkpoint ----------
     out = {
         "env_name": env_name,
         "seed": seed,

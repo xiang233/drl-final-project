@@ -30,7 +30,7 @@ class QNetwork(nn.Module):
 
     def forward(self, s, a):
         x = torch.cat([s, a], dim=-1)
-        return self.net(x).squeeze(-1)  # [B]
+        return self.net(x).squeeze(-1)  
 
 
 class VNetwork(nn.Module):
@@ -39,14 +39,10 @@ class VNetwork(nn.Module):
         self.net = MLP(state_dim, 1, hid=hid)
 
     def forward(self, s):
-        return self.net(s).squeeze(-1)  # [B]
+        return self.net(s).squeeze(-1)  
 
 
 class PolicyNetwork(nn.Module):
-    """
-    Deterministic tanh policy: a = tanh(f(s)).
-    This works well with advantage-weighted regression using MSE.
-    """
     def __init__(self, state_dim, action_dim, hid=256):
         super().__init__()
         self.backbone = MLP(state_dim, action_dim, hid=hid)
@@ -56,10 +52,6 @@ class PolicyNetwork(nn.Module):
 
 
 def expectile_loss(diff, tau):
-    """
-    diff = target - value
-    L_tau(u) = |tau - 1(u < 0)| * u^2
-    """
     weight = torch.where(diff >= 0, tau, 1.0 - tau)
     return (weight * diff.pow(2)).mean()
 
@@ -76,11 +68,9 @@ def main(
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
 
-    # ---- unpack from your load_d4rl() ----
-    S = data["S"]          # [N, obs_dim]
-    A = data["A"]          # [N, act_dim]
+    S = data["S"]          
+    A = data["A"]          
 
-    # next states under "S_next"
     if "S_next" in data:
         S2 = data["S_next"]
     elif "next_observations" in data:
@@ -88,12 +78,10 @@ def main(
     else:
         raise KeyError("No next-state key (S_next/next_observations) in data.")
 
-    # rewards, terminals, timeouts
-    R = data["rewards"].astype(np.float32).reshape(-1)  # [N]
+    R = data["rewards"].astype(np.float32).reshape(-1)  
     terminals = data.get("terminals", None)
     timeouts = data.get("timeouts", None)
 
-    # build done flags: terminal OR timeout
     if terminals is not None and timeouts is not None:
         D = np.logical_or(terminals > 0.5, timeouts > 0.5).astype(np.float32)
     elif terminals is not None:
@@ -105,7 +93,6 @@ def main(
 
     s_mean, s_std = data["s_mean"], data["s_std"]
 
-    # ---- normalize states like train_bc.py ----
     Sn = (S - s_mean) / (s_std + 1e-6)
     S2n = (S2 - s_mean) / (s_std + 1e-6)
 
@@ -126,7 +113,6 @@ def main(
     v_opt = optim.Adam(v.parameters(), lr=3e-4)
     pi_opt = optim.Adam(pi.parameters(), lr=3e-4)
 
-    # Build a single TensorDataset for simplicity
     dataset = torch.utils.data.TensorDataset(
         torch.from_numpy(Sn).float(),
         torch.from_numpy(A).float(),
@@ -161,7 +147,6 @@ def main(
         s2_b = s2_b.to(device)
         d_b = d_b.to(device)
 
-        # --- 1) V update: expectile regression on Q(s,a) ---
         with torch.no_grad():
             q_sa = q(s_b, a_b)
         v_s = v(s_b)
@@ -171,7 +156,6 @@ def main(
         v_loss.backward()
         v_opt.step()
 
-        # --- 2) Q update: TD to r + gamma * V_target(s') ---
         with torch.no_grad():
             v_s2 = v_target(s2_b)
             target = r_b + gamma * (1.0 - d_b) * v_s2
@@ -183,7 +167,6 @@ def main(
         q_loss.backward()
         q_opt.step()
 
-        # --- 3) Policy update: advantage-weighted regression ---
         with torch.no_grad():
             q_sa = q(s_b, a_b)
             v_s = v(s_b)
@@ -201,7 +184,6 @@ def main(
         pi_loss.backward()
         pi_opt.step()
 
-        # --- 4) Target V soft update ---
         soft_update_v_target()
 
         updates += 1
@@ -213,11 +195,10 @@ def main(
                 f"Pi loss {pi_loss.item():.4f}"
             )
 
-    # Save just like BC, but with a different filename and object name.
     out_path = f"iql_{env_name.replace('-', '_')}_seed{seed}.pt"
     torch.save(
         {
-            "model": pi.state_dict(),   # keep key name 'model' so FQE can reuse BC loader
+            "model": pi.state_dict(),   
             "q": q.state_dict(),
             "v": v.state_dict(),
             "env_name": env_name,

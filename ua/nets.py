@@ -1,4 +1,4 @@
-# ua/nets.py
+
 import copy
 import torch
 import torch.nn as nn
@@ -24,11 +24,9 @@ class Actor(nn.Module):
             nn.Linear(hid, act_dim)
         )
     def forward(self, s):
-        # *** CORRECTED: Apply tanh to bound actions to [-1, 1] ***
         return torch.tanh(self.net(s))
 
 class Critic(nn.Module):
-    """Deterministic Q(s,a) scalar, now with optional dropout."""
     def __init__(self, obs_dim, act_dim, hid=256, dropout_p: float = 0.0):
         super().__init__()
         self.q = nn.Sequential(
@@ -42,7 +40,6 @@ class Critic(nn.Module):
         return self.q(torch.cat([s, a], dim=-1))
 
 class CriticEnsemble(nn.Module):
-    """K independent critics; forward returns [K, B, 1] tensor if keepdim else [B, K]."""
     def __init__(self, obs_dim, act_dim, K=4, hid=256, dropout_p: float = 0.0):
         super().__init__()
         self.members = nn.ModuleList(
@@ -50,14 +47,13 @@ class CriticEnsemble(nn.Module):
         )
 
     def forward(self, s, a, keepdim=False):
-        outs: List[torch.Tensor] = [m(s, a) for m in self.members]  # each [B,1]
-        Q = torch.stack(outs, dim=0)  # [K, B, 1]
+        outs: List[torch.Tensor] = [m(s, a) for m in self.members]  
+        Q = torch.stack(outs, dim=0)  
         if keepdim:
             return Q
-        return Q.squeeze(-1).transpose(0, 1)  # [B, K]
+        return Q.squeeze(-1).transpose(0, 1) 
 
     def clone_targets(self):
-        # simpler & safer: full deepcopy
         tgt = copy.deepcopy(self)
         for p in tgt.parameters():
             p.requires_grad_(False)

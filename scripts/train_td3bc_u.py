@@ -1,18 +1,3 @@
-# scripts/train_td3bc_u.py
-#
-# TD3+BC with sigma_Q-based scaling of the Q term (uncertainty-aware TD3+BC).
-#
-# Actor loss:
-#   L_pi = - E[ λ_eff(s) * Q(s, π(s)) - ||π(s) - a||^2 ]
-#
-# where:
-#   λ_base = base_w / E_s[ |Q(s, a_dataset)| ]   (TD3+BC normalization)
-#   λ_eff(s) = λ_base * g(σ_Q(s, π(s)))
-#   g is a decreasing function of relative uncertainty:
-#       high σ_Q -> g < 1  (more conservative, closer to BC)
-#       low  σ_Q -> g > 1  (more optimistic)
-#
-# This avoids training a TempNet and keeps the optimization well behaved.
 
 import argparse
 import numpy as np
@@ -36,9 +21,9 @@ def main(env_name="hopper-medium-replay-v2",
          K=4,
          gamma=0.99,
          tau=0.005,
-         base_w=2.5,        # TD3+BC α: λ_base = base_w / E|Q|
-         alpha_uq=1.0,      # strength of uncertainty scaling on λ
-         w_min=0.5,         # clamp range for g(σ_Q)
+         base_w=2.5,       
+         alpha_uq=1.0,      
+         w_min=0.5,         
          w_max=2.0,
          actor_lr=3e-4,
          critic_lr=3e-4,
@@ -63,7 +48,6 @@ def main(env_name="hopper-medium-replay-v2",
     if timeouts is None:
         timeouts = np.zeros((S.shape[0],), dtype=np.float32)
 
-    # normalize states
     s_mean, s_std = data["s_mean"], data["s_std"]
     S  = (S  - s_mean) / (s_std + 1e-6)
     Sn = (Sn - s_mean) / (s_std + 1e-6)
@@ -92,14 +76,12 @@ def main(env_name="hopper-medium-replay-v2",
     rng = np.random.default_rng(seed)
     done_mask = np.clip(terminals + timeouts, 0, 1).astype(np.float32)
 
-    # pre-torch tensors
     S_t  = torch.from_numpy(S).to(device)
     A_t  = torch.from_numpy(A).to(device)
     R_t  = torch.from_numpy(Rp.squeeze().astype(np.float32)).to(device)
     Sn_t = torch.from_numpy(Sn).to(device)
     D_t  = torch.from_numpy(done_mask.squeeze().astype(np.float32)).to(device)
 
-    # logging placeholders
     lam_base_val = torch.tensor(base_w, device=device)
     lam_eff_mean_val = torch.tensor(base_w, device=device)
     g_mean_val = torch.tensor(1.0, device=device)
@@ -112,71 +94,61 @@ def main(env_name="hopper-medium-replay-v2",
         s2 = Sn_t[idx]
         d  = D_t[idx]
 
-        # ---------- Critic update ----------
+        # Critic update 
         with torch.no_grad():
             a2 = actor_targ(s2)
             noise = torch.randn_like(a2) * target_noise
             noise = torch.clamp(noise, -noise_clip, noise_clip)
             a2_noisy = torch.clamp(a2 + noise, -1.0, 1.0)
 
-            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  # [K,B,1]
-            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    # [B]
-            y = r + gamma * (1.0 - d) * Qt_min                  # [B]
+            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  
+            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    
+            y = r + gamma * (1.0 - d) * Qt_min                 
 
-        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    # [K,B]
+        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    
         critic_loss = ((Qs.transpose(0, 1) - y.unsqueeze(-1)) ** 2).mean()
 
         crt_opt.zero_grad()
         critic_loss.backward()
         crt_opt.step()
 
-        # ---------- Actor update (delayed) ----------
+        # Actor update 
         if t % policy_delay == 0:
             s_detach = s
-            pi_s = actor(s_detach)  # [B, act_dim]
+            pi_s = actor(s_detach)  
 
-            # Q(s, π(s)) + ensemble std (with grad)
-            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
-            Q_pi_mean = Q_pi_all.mean(dim=1)                           # [B]
-            sigma_q = Q_pi_all.std(dim=1)                              # [B]
+            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  
+            Q_pi_mean = Q_pi_all.mean(dim=1)                           
+            sigma_q = Q_pi_all.std(dim=1)                              
 
-            # TD3+BC base lambda from dataset Q(s, a)
             with torch.no_grad():
-                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  # [B]
+                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1) 
                 Q_mean_abs = Q_bc.abs().mean()
                 lam_base = base_w / (Q_mean_abs + 1e-8)
 
-                # relative uncertainty
                 sigma_mean = sigma_q.mean()
-                sigma_rel = sigma_q / (sigma_mean + 1e-8)  # dimensionless
+                sigma_rel = sigma_q / (sigma_mean + 1e-8)  
 
-                # g(σ_rel): >1 when σ_rel < 1, <1 when σ_rel > 1
-                #   g = exp(-α (σ_rel - 1)), then clamp
                 g = torch.exp(-alpha_uq * (sigma_rel - 1.0))
                 g = torch.clamp(g, min=w_min, max=w_max)
 
-                lam_eff = lam_base * g  # [B]
+                lam_eff = lam_base * g  
+            
+            bc_term = ((pi_s - a) ** 2).sum(dim=1)  
 
-            # BC term
-            bc_term = ((pi_s - a) ** 2).sum(dim=1)  # [B]
-
-            # actor loss: per-sample λ_eff
             actor_loss = -(lam_eff * Q_pi_mean - bc_term).mean()
 
             act_opt.zero_grad()
             actor_loss.backward()
             act_opt.step()
 
-            # soft targets
             soft_update_(critics, critics_t, tau)
             soft_update_(actor, actor_targ, tau)
 
-            # logging
             lam_base_val = lam_base.detach()
             lam_eff_mean_val = lam_eff.mean().detach()
             g_mean_val = g.mean().detach()
 
-        # ---------- Logging ----------
         if t % 1000 == 0:
             with torch.no_grad():
                 pi_train = actor(S_t[:4096])
@@ -191,7 +163,6 @@ def main(env_name="hopper-medium-replay-v2",
                 f"g_mean={g_mean_val.item():.3f})"
             )
 
-    # ---------- Save checkpoint ----------
     out = {
         "env_name": env_name,
         "seed": seed,
@@ -215,7 +186,7 @@ def main(env_name="hopper-medium-replay-v2",
             target_noise=target_noise,
             noise_clip=noise_clip,
         ),
-        "algo": "td3bc_u_sigmaQ",   # distinguish in checkpoint; filename still td3bc_u_...
+        "algo": "td3bc_u_sigmaQ",   
     }
     out_path = f"td3bc_u_{env_name.replace('-', '_')}_seed{seed}.pt"
     torch.save(out, out_path)

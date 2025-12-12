@@ -1,22 +1,3 @@
-#!/usr/bin/env python
-"""
-Collect FQE and OOD stats for all checkpoints (including TD3BC-U ablations)
-and aggregate to CSV + Markdown.
-
-Usage (from repo root):
-  python -m tools.collect_results_ablations --pt_dir generated_data
-
-This will:
-  - Scan generated_data/*.pt
-  - For each ckpt:
-      * infer env/method/seed
-      * load OOD npz and compute mean/p50/p90/p95
-      * recompute FQE via scripts.estimate_return
-  - Write:
-      results/suite_results_ablations.csv
-      results/suite_results_ablations_summary.csv
-      results/suite_results_ablations_summary.md
-"""
 
 import argparse
 import glob
@@ -34,30 +15,14 @@ from ua.utils import set_seed
 from scripts.estimate_return import load_policy, fqe_evaluate
 
 
-# -------------------- helpers to infer method/seed -------------------- #
+# helpers 
 
 def infer_method_from_name(stem: str) -> str:
-    """
-    Infer algorithm name from checkpoint filename stem.
-
-    Examples (with your current naming):
-      'bc_hopper_medium_replay_v2_seed0'                  -> 'bc'
-      'iql_hopper_medium_replay_v2_seed0'                 -> 'iql'
-      'iql_u_hopper_medium_replay_v2_seed0'               -> 'iql_u'
-      'iql_u_mcdo_hopper_medium_replay_v2_seed0'          -> 'iql_u_mcdo'
-      'td3bc_hopper_medium_replay_v2_seed0'               -> 'td3bc'
-      'td3bc_u_hopper_medium_replay_v2_seed0'             -> 'td3bc_u'
-      'td3bc_u_mcdo_hopper_medium_replay_v2_seed0'        -> 'td3bc_u_mcdo'
-      'td3bc_u_pessimist0_hopper_medium_replay_v2_seed0'  -> 'td3bc_u_pessimistic_alpha0.0'
-      'td3bc_u_pessimist0.3_hopper_medium_replay_v2...'   -> 'td3bc_u_pessimistic_alpha0.3'
-      'td3bc_u_pessimist0.5_hopper_medium_replay_v2...'   -> 'td3bc_u_pessimistic_alpha0.5'
-      'td3bc_u_pessimist1_hopper_medium_replay_v2...'     -> 'td3bc_u_pessimistic_alpha1.0'
-    """
     # BC
     if stem.startswith("bc_"):
         return "bc"
 
-    # IQL family
+    # IQL 
     if stem.startswith("iql_u_mcdo_"):
         return "iql_u_mcdo"
     if stem.startswith("iql_u_"):
@@ -65,11 +30,11 @@ def infer_method_from_name(stem: str) -> str:
     if stem.startswith("iql_"):
         return "iql"
 
-    # TD3BC family (order matters: more specific first)
+    # TD3BC 
     if stem.startswith("td3bc_u_mcdo_"):
         return "td3bc_u_mcdo"
 
-    # TD3BC-U pessimistic ablations (by alpha *encoded in the name*)
+    # TD3BC-U pessimistic ablations + alpha 
     # alpha = 0.0
     if stem.startswith("td3bc_u_pessimist0_"):
         return "td3bc_u_pessimistic_alpha0.0"
@@ -95,9 +60,6 @@ def infer_method_from_name(stem: str) -> str:
 
 
 def parse_seed_from_name(stem: str):
-    """
-    Parse ..._seedX from filename stem, returns int or None.
-    """
     m = re.search(r"_seed(\d+)", stem)
     if m:
         return int(m.group(1))
@@ -105,13 +67,6 @@ def parse_seed_from_name(stem: str):
 
 
 def find_ood_npz(stem: str, env_name: str, pt_dir: str, ood_subdir: str | None = None):
-    """
-    Try to find OOD .npz for this checkpoint.
-    Looks for: <stem>.ood_<env_name>.npz in:
-      - pt_dir
-      - pt_dir/ood_subdir (if given)
-    Returns path or None.
-    """
     base_name = f"{stem}.ood_{env_name}.npz"
     candidates = [osp.join(pt_dir, base_name)]
     if ood_subdir is not None:
@@ -124,11 +79,6 @@ def find_ood_npz(stem: str, env_name: str, pt_dir: str, ood_subdir: str | None =
 
 
 def ood_stats_from_npz(path: str):
-    """
-    Load distances from .npz (expects key 'd') and compute mean / percentiles.
-    Returns dict with keys: ood_mean, ood_p50, ood_p90, ood_p95.
-    If anything goes wrong, returns NaNs.
-    """
     if path is None or not osp.exists(path):
         return dict(
             ood_mean=np.nan,
@@ -155,16 +105,12 @@ def ood_stats_from_npz(path: str):
         )
 
 
-# -------------------- aggregation helpers -------------------- #
+# aggregation helpers
 
 AGG_COLS = ["fqe", "ood_mean", "ood_p50", "ood_p90", "ood_p95"]
 
 
 def agg(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate per-(env, method, seed) rows into per-(env, method) stats.
-    """
-    # Drop exact duplicates so repeated runs don't double-count
     df = df.drop_duplicates(subset=["env", "seed", "method", "ckpt"])
     g = (
         df.groupby(["env", "method"], dropna=False)[AGG_COLS]
@@ -172,7 +118,6 @@ def agg(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    # Flatten MultiIndex columns e.g. ('fqe','mean') -> 'fqe_mean'
     g.columns = [
         c if isinstance(c, str) else "_".join([x for x in c if x])
         for c in g.columns.to_list()
@@ -181,9 +126,6 @@ def agg(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fmt_cell(m, s, n):
-    """
-    Pretty string like: '96.73 ± 3.60 (n=3)' or '285.61 ± nan (n=1)'
-    """
     try:
         s_str = f"{s:.2f}" if pd.notna(s) else "nan"
         return f"{m:.2f} ± {s_str} (n={int(n)})"
@@ -208,24 +150,14 @@ def to_markdown(out_df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-# -------------------- main collection logic -------------------- #
-
 def collect_for_ckpt(
     ckpt_path: str,
     fqe_iters: int,
     pt_dir: str,
     ood_subdir: str | None = None,
 ):
-    """
-    For a single checkpoint:
-      - load metadata (env_name, seed, algo/method)
-      - compute FQE
-      - load OOD npz stats
-    Returns a dict row for the CSV.
-    """
     stem = osp.splitext(osp.basename(ckpt_path))[0]
 
-    # Load checkpoint metadata
     try:
         state = torch.load(ckpt_path, map_location="cpu")
     except Exception as e:
@@ -240,14 +172,11 @@ def collect_for_ckpt(
         print(f"[WARN] {ckpt_path} missing 'env_name'; skipping.")
         return None
 
-    # 1) Try to infer method from filename (for ablations etc.)
     method = infer_method_from_name(stem)
 
-    # 2) If unknown, fall back to algo field (if present)
     if method == "unknown" and algo is not None:
         method = algo
 
-    # Seed: prefer ckpt seed; if missing, fallback to name
     seed_name = parse_seed_from_name(stem)
     if seed_ckpt is None:
         seed = seed_name
@@ -258,7 +187,7 @@ def collect_for_ckpt(
         print(f"[WARN] Could not infer seed for {ckpt_path}; skipping.")
         return None
 
-    # --- FQE: recompute using estimate_return utilities ---
+    # FQE
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -269,7 +198,7 @@ def collect_for_ckpt(
     pi = load_policy(ckpt_path, s_dim, a_dim, device)
     fqe = fqe_evaluate(pi, data, iters=fqe_iters, device=device)
 
-    # --- OOD: read npz and compute stats ---
+    # OOD
     ood_npz_path = find_ood_npz(stem, env_name, pt_dir, ood_subdir=ood_subdir)
     ood_stats = ood_stats_from_npz(ood_npz_path)
 
@@ -327,12 +256,10 @@ def main():
     df = pd.DataFrame(rows)
     os.makedirs(results_dir, exist_ok=True)
 
-    # 1) Write raw per-seed CSV
     base_csv = Path(results_dir) / "suite_results_ablations.csv"
     df.to_csv(base_csv, index=False)
     print(f"[INFO] Wrote per-seed results to {base_csv}")
 
-    # 2) Aggregate and write summary CSV + Markdown
     out = agg(df)
     summary_csv = base_csv.with_name("suite_results_ablations_summary.csv")
     out.to_csv(summary_csv, index=False)

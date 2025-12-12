@@ -1,4 +1,3 @@
-# scripts/train_td3bc.py
 
 import argparse
 import numpy as np
@@ -22,15 +21,12 @@ def main(env_name="hopper-medium-replay-v2",
          K=4,
          gamma=0.99,
          tau=0.005,
-         alpha_bc=2.5,  # The alpha from the paper (2.5 default)
+         alpha_bc=2.5,  
          actor_lr=3e-4,
          critic_lr=3e-4,
          policy_delay=2,
          target_noise=0.2,
          noise_clip=0.5):
-    """
-    Plain TD3+BC baseline with Q-normalized BC coefficient (alpha / mean(|Q|)).
-    """
 
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
@@ -50,7 +46,6 @@ def main(env_name="hopper-medium-replay-v2",
     if timeouts is None:
         timeouts = np.zeros((S.shape[0],), dtype=np.float32)
 
-    # normalize states
     s_mean, s_std = data["s_mean"], data["s_std"]
     S = (S - s_mean) / (s_std + 1e-6)
     Sn = (Sn - s_mean) / (s_std + 1e-6)
@@ -79,14 +74,12 @@ def main(env_name="hopper-medium-replay-v2",
     rng = np.random.default_rng(seed)
     done_mask = np.clip(terminals + timeouts, 0, 1).astype(np.float32)
 
-    # pre-torch tensors
     S_t = torch.from_numpy(S).to(device)
     A_t = torch.from_numpy(A).to(device)
     R_t = torch.from_numpy(Rp.squeeze().astype(np.float32)).to(device)
     Sn_t = torch.from_numpy(Sn).to(device)
     D_t = torch.from_numpy(done_mask.squeeze().astype(np.float32)).to(device)
 
-    # initialize placeholder for lambda logging
     lam = torch.tensor(alpha_bc).to(device) 
     
     for t in range(1, steps + 1):
@@ -98,7 +91,7 @@ def main(env_name="hopper-medium-replay-v2",
         s2 = Sn_t[idx]
         d = D_t[idx]
 
-        # ----- critic update -----
+        # critic update 
         with torch.no_grad():
             a2 = actor_targ(s2)
             noise = torch.randn_like(a2) * target_noise
@@ -109,43 +102,36 @@ def main(env_name="hopper-medium-replay-v2",
             Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)
             y = r + gamma * (1.0 - d) * Qt_min
 
-        # Get Q-values for the BC normalization term
+
         Qs = critics.forward(s, a, keepdim=True).squeeze(-1)  # [K,B]
-        
-        # Critic loss uses the mean Q over the ensemble
+
         critic_loss = torch.mean((Qs.transpose(0, 1) - y.unsqueeze(-1)) ** 2)
 
         crt_opt.zero_grad()
         critic_loss.backward()
         crt_opt.step()
 
-        # ----- delayed actor update -----
+        # delayed actor update 
         if t % policy_delay == 0:
             s_detach = s
             pi_s = actor(s_detach)
 
-            # --- DYNAMIC BC COEFFICIENT CALCULATION ---
             with torch.no_grad():
-                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  # [B]
+                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  
                 Q_mean_abs = Q_bc.abs().mean()
-                
-                # TD3+BC normalization: lambda = alpha / mean(|Q(s,a)|)
+      
                 lam = alpha_bc / (Q_mean_abs + 1e-8)
-                
-            # Q_pi is Q(s, pi(s)), must be computed *outside* no_grad for policy gradient
-            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
-            Q_pi_mean = Q_pi_all.mean(dim=1)  # [B]
 
-            bc_term = torch.sum((pi_s - a) ** 2, dim=1) # [B]
-            
-            # FIX: Loss restructured to minimize [ -lambda * Q + ||pi - a||^2 ]
+            Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  
+            Q_pi_mean = Q_pi_all.mean(dim=1)  
+
+            bc_term = torch.sum((pi_s - a) ** 2, dim=1) 
             actor_loss = -(lam * Q_pi_mean - bc_term).mean()
 
             act_opt.zero_grad()
             actor_loss.backward()
             act_opt.step()
 
-            # soft target updates
             soft_update_(critics, critics_t, tau)
             soft_update_(actor, actor_targ, tau)
 
@@ -163,8 +149,7 @@ def main(env_name="hopper-medium-replay-v2",
                 f"Q_mean@pi={Q_mean:.3f} "
                 f"(lambda={log_lam:.4f})"
             )
-
-    # save checkpoint
+            
     out = {
         "env_name": env_name,
         "seed": seed,

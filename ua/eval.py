@@ -1,9 +1,8 @@
-# ua/eval.py
+
 import numpy as np
 
 def evaluate(env, policy, episodes=10, seed=42):
     if env is None:
-        # offline-only mode on Mac: skip rollouts
         return float("nan"), float("nan")
     returns = []
     for ep in range(episodes):
@@ -14,7 +13,6 @@ def evaluate(env, policy, episodes=10, seed=42):
             ret += r
         returns.append(ret)
     raw = np.mean(returns)
-    # D4RL normalized score in [~0,100]
     try:
         norm = env.get_normalized_score(raw) * 100.0
     except Exception:

@@ -1,6 +1,3 @@
-# scripts/train_iql_u_mcdo.py
-#
-# IQL-UA with MC-dropout-based uncertainty on Q(s,pi(s)).
 
 import argparse
 import numpy as np
@@ -37,10 +34,6 @@ class VNetwork(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    """
-    Deterministic tanh policy: a = tanh(f(s)).
-    We train this via advantage-weighted regression (IQL style).
-    """
     def __init__(self, state_dim, action_dim, hid=256):
         super().__init__()
         self.backbone = MLP(state_dim, action_dim, hid=hid)
@@ -50,10 +43,6 @@ class PolicyNetwork(nn.Module):
 
 
 def expectile_loss(diff, tau):
-    """
-    diff = target - value
-    L_tau(u) = |tau - 1(u < 0)| * u^2
-    """
     weight = torch.where(diff >= 0, tau, 1.0 - tau)
     return (weight * diff.pow(2)).mean()
 
@@ -78,18 +67,10 @@ def main(env_name="hopper-medium-replay-v2",
          actor_lr=3e-4,
          dropout_p=0.1,
          T_uq=10):
-    """
-    IQL-UA (MC-dropout version):
-      - Q: CriticEnsemble with K heads and dropout
-      - V: expectile regression to MC-dropout mean Q(s,a)
-      - Policy: advantage-weighted BC with IQL weights * uncertainty penalty
-        uncertainty = MC-dropout std of Q(s, pi(s));
-        penalty = exp(-unc_alpha * std), clamped to [unc_min, 1].
-    """
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
 
-    # ----- load + normalize data -----
+    # load & normalize data 
     S = data["S"].astype(np.float32)
     A = data["A"].astype(np.float32)
     Rp = data.get("rewards", None)
@@ -120,14 +101,12 @@ def main(env_name="hopper-medium-replay-v2",
     else:
         device = "cpu"
 
-    # ----- networks -----
     critics = CriticEnsemble(
         obs_dim, act_dim, K=K, hid=256, dropout_p=dropout_p
     ).to(device)
     v = VNetwork(obs_dim).to(device)
     pi = PolicyNetwork(obs_dim, act_dim).to(device)
 
-    # target V for stable TD
     v_targ = copy.deepcopy(v).to(device)
     for p in v_targ.parameters():
         p.requires_grad = False
@@ -136,7 +115,6 @@ def main(env_name="hopper-medium-replay-v2",
     v_opt = optim.Adam(v.parameters(), lr=v_lr)
     pi_opt = optim.Adam(pi.parameters(), lr=actor_lr)
 
-    # pre-torch tensors
     S_t = torch.from_numpy(S).to(device)
     A_t = torch.from_numpy(A).to(device)
     R_t = torch.from_numpy(Rp.squeeze().astype(np.float32)).to(device)
@@ -151,7 +129,7 @@ def main(env_name="hopper-medium-replay-v2",
                 p_t.data.mul_(1.0 - v_tau_ema)
                 p_t.data.add_(v_tau_ema * p.data)
 
-    # ----- training loop -----
+    # training loop 
     for t in range(1, steps + 1):
         idx = make_batch_indices(N, bs, rng)
         s = S_t[idx]
@@ -160,9 +138,8 @@ def main(env_name="hopper-medium-replay-v2",
         s2 = Sn_t[idx]
         d = D_t[idx]
 
-        # 1) V update: expectile regression to MC-dropout mean Q(s,a)
         with torch.no_grad():
-            Q_mean = mc_dropout_q_mean(critics, s, a, T=T_uq)  # [B]
+            Q_mean = mc_dropout_q_mean(critics, s, a, T=T_uq)  
         v_s = v(s)
         v_loss = expectile_loss(Q_mean - v_s, tau)
 
@@ -170,23 +147,21 @@ def main(env_name="hopper-medium-replay-v2",
         v_loss.backward()
         v_opt.step()
 
-        # 2) Q update: TD to r + gamma * V_target(s')
         with torch.no_grad():
             v_s2 = v_targ(s2)
-            target = r + gamma * (1.0 - d) * v_s2  # [B]
+            target = r + gamma * (1.0 - d) * v_s2  
 
-        Q_all = critics.forward(s, a, keepdim=True).squeeze(-1)  # [K, B]
-        td_err = Q_all.transpose(0, 1) - target.unsqueeze(-1)    # [B, K]
+        Q_all = critics.forward(s, a, keepdim=True).squeeze(-1)  
+        td_err = Q_all.transpose(0, 1) - target.unsqueeze(-1)    
         critic_loss = 0.5 * (td_err.pow(2).mean())
 
         crt_opt.zero_grad()
         critic_loss.backward()
         crt_opt.step()
 
-        # 3) Policy update: advantage-weighted BC with uncertainty attenuation
         with torch.no_grad():
             pi_s = pi(s)
-            Q_pi_mean, Q_pi_std = mc_dropout_q_stats(critics, s, pi_s, T=T_uq)  # [B],[B]
+            Q_pi_mean, Q_pi_std = mc_dropout_q_stats(critics, s, pi_s, T=T_uq)  
 
             v_s = v(s)
             adv = Q_pi_mean - v_s
@@ -195,24 +170,21 @@ def main(env_name="hopper-medium-replay-v2",
             adv_std = adv.std() + 1e-6
             norm_adv = (adv - adv_mean) / adv_std
 
-            # IQL-style advantage weights
             awac_weights = torch.exp(beta * norm_adv)
 
-            # uncertainty penalty: higher std => smaller factor (more conservative)
             unc_factor = torch.exp(-unc_alpha * Q_pi_std)
             unc_factor = torch.clamp(unc_factor, min=unc_min, max=1.0)
 
             weights = (awac_weights * unc_factor).clamp(max=100.0)
 
         pi_s = pi(s)
-        mse = (pi_s - a).pow(2).sum(dim=1)   # [B]
+        mse = (pi_s - a).pow(2).sum(dim=1)   
         pi_loss = (weights * mse).mean()
 
         pi_opt.zero_grad()
         pi_loss.backward()
         pi_opt.step()
 
-        # 4) soft-update V target
         soft_update_v_target()
 
         if t % 1000 == 0:
@@ -232,12 +204,11 @@ def main(env_name="hopper-medium-replay-v2",
                 f"w_mean={w_mean:.3f}"
             )
 
-    # ----- save checkpoint -----
     out = {
         "env_name": env_name,
         "seed": seed,
         "K": K,
-        "actor": pi.state_dict(),      # keep key name 'actor' for consistency
+        "actor": pi.state_dict(),     
         "critics": critics.state_dict(),
         "v": v.state_dict(),
         "s_mean": s_mean,

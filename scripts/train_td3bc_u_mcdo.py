@@ -1,6 +1,3 @@
-# scripts/train_td3bc_u_mcdo.py
-#
-# TD3+BC-UA with MC-dropout-based pessimistic Q(s,pi(s)).
 
 import argparse
 import numpy as np
@@ -23,8 +20,8 @@ def main(env_name="hopper-medium-replay-v2",
          K=4,
          gamma=0.99,
          tau=0.005,
-         base_w=2.5,       # alpha in TD3+BC: lambda = base_w / E|Q|
-         alpha_uq=1.0,     # strength of uncertainty penalty on Q
+         base_w=2.5,       
+         alpha_uq=1.0,     
          actor_lr=3e-4,
          critic_lr=3e-4,
          policy_delay=2,
@@ -32,17 +29,6 @@ def main(env_name="hopper-medium-replay-v2",
          noise_clip=0.5,
          dropout_p=0.1,
          T_uq=5):
-    """
-    TD3+BC-UA with Pessimistic Q and MC-dropout uncertainty.
-
-    Actor objective:
-        L_pi = - E[ lambda * ( Q_mean(s, pi(s)) - alpha_uq * sigma_Q(s, pi(s)) )
-                     - ||pi(s) - a||^2 ]
-
-    where:
-      - lambda = base_w / E_s[ |Q(s, a_dataset)| ]
-      - sigma_Q is std over Monte Carlo dropout + ensemble at (s, pi(s))
-    """
 
     set_seed(seed)
     _, data = load_d4rl(env_name, seed)
@@ -83,7 +69,7 @@ def main(env_name="hopper-medium-replay-v2",
     ).to(device)
     critics_t = critics.clone_targets().to(device)
     critics_t.load_state_dict(critics.state_dict())
-    critics_t.eval()  # deterministic targets
+    critics_t.eval() 
 
     act_opt = optim.Adam(actor.parameters(), lr=actor_lr)
     crt_opt = optim.Adam(critics.parameters(), lr=critic_lr)
@@ -97,7 +83,6 @@ def main(env_name="hopper-medium-replay-v2",
     Sn_t = torch.from_numpy(Sn).to(device)
     D_t = torch.from_numpy(done_mask.squeeze()).to(device)
 
-    # logging placeholders
     lam_val = torch.tensor(base_w, device=device)
     sigma_Q_mean_val = torch.tensor(0.0, device=device)
     Q_pess_mean_val = torch.tensor(0.0, device=device)
@@ -110,73 +95,63 @@ def main(env_name="hopper-medium-replay-v2",
         s2 = Sn_t[idx]
         d = D_t[idx]
 
-        # ---------- Critic update ----------
+        # Critic update 
         with torch.no_grad():
-            # target policy with smoothing (TD3)
             a2 = actor_targ(s2)
             noise = torch.randn_like(a2) * target_noise
             noise = torch.clamp(noise, -noise_clip, noise_clip)
             a2_noisy = torch.clamp(a2 + noise, -1.0, 1.0)
 
-            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  # [K,B,1]
-            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    # [B]
-            y = r + gamma * (1.0 - d) * Qt_min                  # [B]
+            Qt = critics_t.forward(s2, a2_noisy, keepdim=True)  
+            Qt_min = torch.min(Qt, dim=0).values.squeeze(-1)    
+            y = r + gamma * (1.0 - d) * Qt_min                 
 
-        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    # [K,B]
+        Qs = critics.forward(s, a, keepdim=True).squeeze(-1)    
         critic_loss = torch.mean((Qs.transpose(0, 1) - y.unsqueeze(-1)) ** 2)
 
         crt_opt.zero_grad()
         critic_loss.backward()
         crt_opt.step()
 
-        # ---------- Actor update (delayed) ----------
+        # Actor update 
         if t % policy_delay == 0:
             s_detach = s
-            pi_s = actor(s_detach)  # [B, act_dim]
+            pi_s = actor(s_detach) 
 
-            # MC-dropout over critic ensemble for Q(s, pi(s)) WITH grad
             Q_samples = []
-            critics.train()  # enable dropout for MC sampling
+            critics.train()  
             for _ in range(T_uq):
-                Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  # [B,K]
-                Q_samples.append(Q_pi_all.unsqueeze(0))  # [1,B,K]
-            critics.train()  # keep train mode for critic regularization
+                Q_pi_all = critics.forward(s_detach, pi_s, keepdim=False)  
+                Q_samples.append(Q_pi_all.unsqueeze(0))  
+            critics.train()  
 
-            Q_samples = torch.cat(Q_samples, dim=0)  # [T,B,K]
-            Q_pi_mean = Q_samples.mean(dim=(0, 2))   # [B]
-            sigma_Q = Q_samples.std(dim=(0, 2))      # [B]
+            Q_samples = torch.cat(Q_samples, dim=0)  
+            Q_pi_mean = Q_samples.mean(dim=(0, 2))   
+            sigma_Q = Q_samples.std(dim=(0, 2))      
 
-            # TD3+BC lambda normalization (no grad)
             with torch.no_grad():
                 critics.eval()
-                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  # [B]
+                Q_bc = critics.forward(s_detach, a, keepdim=False).mean(dim=1)  
                 critics.train()
                 Q_mean_abs = Q_bc.abs().mean()
                 lam = base_w / (Q_mean_abs + 1e-8)
 
-            # Pessimistic Q
-            Q_pess = Q_pi_mean - alpha_uq * sigma_Q  # [B]
+            Q_pess = Q_pi_mean - alpha_uq * sigma_Q  
 
-            # BC term (no UA weight)
-            bc_term = torch.sum((pi_s - a) ** 2, dim=1)  # [B]
-
-            # Actor loss: minimize [ -lambda * Q_pess + ||pi - a||^2 ]
+            bc_term = torch.sum((pi_s - a) ** 2, dim=1)  
             actor_loss = -(lam * Q_pess - bc_term).mean()
 
             act_opt.zero_grad()
             actor_loss.backward()
             act_opt.step()
 
-            # soft targets
             soft_update_(critics, critics_t, tau)
             soft_update_(actor, actor_targ, tau)
 
-            # update logging scalars
             lam_val = lam.detach()
             sigma_Q_mean_val = sigma_Q.mean().detach()
             Q_pess_mean_val = Q_pess.mean().detach()
 
-        # ---------- Logging ----------
         if t % 1000 == 0:
             with torch.no_grad():
                 critics.eval()
@@ -193,7 +168,6 @@ def main(env_name="hopper-medium-replay-v2",
                 f"Q_pess={Q_pess_mean_val.item():.3f})"
             )
 
-    # ---------- Save checkpoint ----------
     out = {
         "env_name": env_name,
         "seed": seed,

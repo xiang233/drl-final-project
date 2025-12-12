@@ -10,13 +10,9 @@ from ua.datasets import load_d4rl
 from ua.utils import set_seed
 
 
-# --------- Basic networks (match training architectures) ---------
+# Basic networks
 
 class MLP(nn.Module):
-    """
-    Simple 2-layer MLP, same as in train_bc.py:
-      Linear(din, 256) -> ReLU -> Linear(256, 256) -> ReLU -> Linear(256, dout)
-    """
     def __init__(self, din, dout, hid=256):
         super().__init__()
         self.net = nn.Sequential(
@@ -30,10 +26,6 @@ class MLP(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    """
-    Deterministic tanh policy: a = tanh(backbone(s)).
-    This matches the PolicyNetwork we used for IQL / IQL-U.
-    """
     def __init__(self, state_dim, action_dim, hid=256):
         super().__init__()
         self.backbone = MLP(state_dim, action_dim, hid=hid)
@@ -42,27 +34,15 @@ class PolicyNetwork(nn.Module):
         return torch.tanh(self.backbone(s))
 
 
-# --------- Policy loader that handles all algos ---------
+# Policy loader
 
 def load_policy(path, s_dim, a_dim, device):
-    """
-    Load a policy from a checkpoint, handling:
-      - BC:                  {'model': MLP.state_dict(), 'algo': 'bc' or no 'algo'}
-      - TD3BC-U (+ variants):{'actor': Actor.state_dict(), 'algo': 'td3bc_u' / 'td3bc_u_pessimistic' / 'td3bc_u_pessimistic_mcdo'}
-      - IQL:                 {'model': PolicyNetwork.state_dict(), 'algo': 'iql'}
-      - IQL-U (+ mcdo):      {'actor': PolicyNetwork.state_dict(), 'algo': 'iql_u' / 'iql_u_mcdo'}
-    Falls back to MLP if algo is unknown but we find 'model' or 'actor'.
-    """
     state = torch.load(path, map_location=device)
     algo = state.get("algo", None)
 
-    # ---- IQL / IQL-U / IQL-U-MCDO ----
-    # Unify all these as the same deterministic PolicyNetwork architecture.
+    # IQL / IQL-U / IQL-U-MCDO 
     if algo in ("iql", "iql_u", "iql_u_mcdo"):
         pi = PolicyNetwork(s_dim, a_dim).to(device)
-        # In our code:
-        #   - plain IQL saves under 'model'
-        #   - IQL-U / IQL-U-MCDO save under 'actor'
         actor_sd = state.get("actor") or state.get("model")
         if actor_sd is None:
             raise KeyError(
@@ -73,9 +53,7 @@ def load_policy(path, s_dim, a_dim, device):
         pi.eval()
         return pi
 
-    # ---- TD3BC-U (+ pessimistic + mcdo variants) ----
-    # TD3BC-U checkpoints look like:
-    #   {"actor": ..., "critics": ..., "K": ..., "env_name": ..., "seed": ..., "cfg": {...}}
+    # TD3BC-U (+ pessimistic + mcdo variants)
     if algo in ("td3bc_u", "td3bc_u_pessimistic", "td3bc_u_pessimistic_mcdo") or (
         "actor" in state and "critics" in state and "K" in state and "v" not in state
     ):
@@ -98,15 +76,13 @@ def load_policy(path, s_dim, a_dim, device):
         pi.eval()
         return pi
 
-    # ---- BC (behavior cloning) ----
-    # BC checkpoints: {"model": MLP.state_dict(), "env_name": ..., "seed": ..., "val_mse": ...}
+    # BC
     if "model" in state and "q" not in state and "v" not in state:
         pi = MLP(s_dim, a_dim).to(device)
         pi.load_state_dict(state["model"], strict=True)
         pi.eval()
         return pi
 
-    # ---- Fallback ----
     key = None
     if "model" in state:
         key = "model"
@@ -130,7 +106,7 @@ def load_policy(path, s_dim, a_dim, device):
     return pi
 
 
-# --------- FQE implementation ---------
+# FQE 
 
 class QMLP(MLP):
     """Q-network: same MLP, but scalar output."""
@@ -252,7 +228,6 @@ def append_fqe_csv(csv_path, row):
         writer.writerow(row)
 
 
-# --------- CLI entrypoint ---------
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -263,7 +238,6 @@ if __name__ == "__main__":
     ap.add_argument("--csv", type=str, default="", help="Optional CSV path to append FQE result")
     args = ap.parse_args()
 
-    # Load checkpoint metadata first so we can infer env/method/seed
     state = torch.load(args.ckpt, map_location="cpu")
     env_name = state.get("env_name", args.env)
     method = infer_method_from_state_or_name(state, args.ckpt)

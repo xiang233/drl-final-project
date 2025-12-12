@@ -13,7 +13,6 @@ FQE_CSV = os.path.join(CKPT_DIR, "fqe_results.csv")
 
 
 def infer_method_from_name(stem):
-    """Infer algorithm name from checkpoint filename stem."""
     if stem.startswith("bc_"):
         return "bc"
     if stem.startswith("td3bc_u_"):
@@ -26,7 +25,6 @@ def infer_method_from_name(stem):
 
 
 def parse_seed_from_name(stem):
-    """Parse ..._seedX from filename stem, returns int or None."""
     m = re.search(r"_seed(\d+)", stem)
     if m:
         return int(m.group(1))
@@ -34,7 +32,6 @@ def parse_seed_from_name(stem):
 
 
 def load_fqe_table(path):
-    """Load generated_data/fqe_results.csv into a list of dicts (or empty list)."""
     if not os.path.exists(path):
         print(f"[INFO] No FQE CSV found at {path}; will mark FQE as missing.")
         return []
@@ -49,7 +46,6 @@ def load_fqe_table(path):
 
 
 def has_fqe_record(fqe_rows, env_name, method, seed):
-    """Check if (env, method, seed) appears in FQE CSV."""
     if not fqe_rows:
         return False
     for r in fqe_rows:
@@ -85,31 +81,26 @@ def check_one_ckpt(pt_path, fqe_rows):
             "has_fqe": False,
         }
 
-    # metadata from checkpoint
     env_name = state.get("env_name", "?")
     algo = state.get("algo", None)
     seed_ckpt = state.get("seed", None)
 
-    # method
     if algo is not None:
         method = algo
     else:
         method = infer_method_from_name(stem)
 
-    # seed from name (if any)
     seed_name = parse_seed_from_name(stem)
 
     seed_mismatch = None
     if seed_ckpt is not None and seed_name is not None:
         seed_mismatch = (seed_ckpt != seed_name)
 
-    # OOD files: <stem>.ood_<env_name>.npz / .png, in same dir as checkpoint
     ood_base = os.path.join(ckpt_dir, f"{stem}.ood_{env_name}")
     ood_npz = f"{ood_base}.npz"
     ood_png = f"{ood_base}.png"
     has_ood = os.path.exists(ood_npz) or os.path.exists(ood_png)
 
-    # FQE entry in generated_data/fqe_results.csv
     has_fqe = False
     if isinstance(seed_ckpt, int):
         has_fqe = has_fqe_record(fqe_rows, env_name, method, seed_ckpt)
@@ -139,7 +130,6 @@ def main():
 
     rows = [check_one_ckpt(p, fqe_rows) for p in ckpts]
 
-    # Pretty print summary
     print("\n=== Checkpoint completeness summary ===")
     header = (
         "file",

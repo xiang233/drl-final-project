@@ -1,4 +1,3 @@
-# ua/fqe.py
 import numpy as np, torch, torch.nn as nn, torch.optim as optim
 
 class MLP(nn.Module):
@@ -12,17 +11,12 @@ class MLP(nn.Module):
     def forward(self, x): return self.net(x)
 
 def fqe_evaluate(policy, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device=None):
-    """
-    policy: callable mapping torch.FloatTensor states -> actions
-    data: dict with S, A, S_next, rewards, terminals and s_mean/s_std (all np.float32)
-    returns: estimated return (dataset-state average of V^pi)
-    """
+
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     S, A, S_next = data["S"], data["A"], data["S_next"]
     R, D = data["rewards"].reshape(-1,1), data["terminals"].reshape(-1,1)
     s_mean, s_std = data["s_mean"], data["s_std"]
 
-    # z-norm states
     def z(x): return (x - s_mean)/(s_std + 1e-6)
     Sz, Snext_z = z(S), z(S_next)
 
@@ -42,7 +36,7 @@ def fqe_evaluate(policy, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device
         s, a, sp, r, d = s.to(device), a.to(device), sp.to(device), r.to(device), d.to(device)
 
         with torch.no_grad():
-            a_pi_sp = policy(sp)                      # a' ~ pi(s')
+            a_pi_sp = policy(sp)                     
             tgt = r + gamma * (1.0 - d) * q(torch.cat([sp, a_pi_sp], dim=-1))
 
         pred = q(torch.cat([s, a], dim=-1))
@@ -51,7 +45,6 @@ def fqe_evaluate(policy, data, gamma=0.99, iters=20000, bs=1024, lr=3e-4, device
 
         if t >= iters: break
 
-    # Estimate dataset-average V^pi(s) = E_{a~pi}[Q(s,a)]
     q.eval()
     with torch.no_grad():
         s = torch.from_numpy(Sz).to(device)

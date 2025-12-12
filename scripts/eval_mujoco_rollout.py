@@ -1,4 +1,3 @@
-# scripts/eval_mujoco_rollout.py
 import argparse
 import os
 import numpy as np
@@ -11,17 +10,11 @@ from scripts.estimate_return import load_policy
 
 
 def make_gym_env(env_name: str):
-    """
-    Create a Gym MuJoCo env matching the D4RL env_name.
-    For D4RL names like 'hopper-medium-replay-v2', the underlying env id is 'Hopper-v3'.
-    """
-    # Simple mapping for your two tasks; expand if needed.
     if env_name.startswith("hopper-"):
         gym_id = "Hopper-v3"
     elif env_name.startswith("walker2d-"):
         gym_id = "Walker2d-v3"
     else:
-        # Fallback: try env_name directly (if you install d4rl and register envs)
         gym_id = env_name
     return gym.make(gym_id)
 
@@ -33,10 +26,7 @@ def eval_policy_in_env(
     render: bool = False,
     seed: int | None = None,
 ):
-    """
-    Roll out a trained policy in a MuJoCo env and return raw + (optional) D4RL-normalized scores.
-    """
-    # Load D4RL dataset just to get state normalization and dims
+    # Load D4RL 
     if seed is None:
         seed = 0
     set_seed(seed)
@@ -49,11 +39,10 @@ def eval_policy_in_env(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load policy with your existing helper
+    # Load policy 
     pi = load_policy(ckpt_path, s_dim, a_dim, device)
     pi.eval()
 
-    # Create gym env
     env = make_gym_env(env_name)
     env.seed(seed)
 
@@ -61,14 +50,12 @@ def eval_policy_in_env(
 
     for ep in range(episodes):
         obs = env.reset()
-        # Gym 0.23 API: reset() -> obs, or obs, info depending on version
         if isinstance(obs, tuple):
             obs, _info = obs
         done = False
         ep_ret = 0.0
 
         while not done:
-            # Normalize observation as in training
             s = (obs - s_mean) / (s_std + 1e-6)
             s_t = torch.from_numpy(s.astype(np.float32)).unsqueeze(0).to(device)
 
@@ -88,12 +75,10 @@ def eval_policy_in_env(
 
     returns = np.array(returns, dtype=np.float32)
 
-    # Optional: D4RL-style normalization if d4rl is installed and env supports it.
     normalized = None
     try:
         import d4rl  # noqa: F401
 
-        # Re-create env with d4rl registration
         env2 = gym.make(env_name)
         normalized = np.array(
             [env2.get_normalized_score(r) * 100.0 for r in returns],
@@ -101,7 +86,6 @@ def eval_policy_in_env(
         )
         env2.close()
     except Exception:
-        # d4rl not installed or env_name not registered as d4rl env.
         pass
 
     return returns, normalized

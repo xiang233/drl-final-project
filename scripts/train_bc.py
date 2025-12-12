@@ -1,4 +1,3 @@
-#scripts/train_bc.py
 import argparse
 from itertools import cycle
 
@@ -29,10 +28,8 @@ def main(env_name="hopper-medium-replay-v2", seed=0, steps=20000, bs=1024):
     S, A = data["S"], data["A"]
     s_mean, s_std = data["s_mean"], data["s_std"]
 
-    # Normalize states with provided stats (avoid signature mismatches)
     Sn = (S - s_mean) / (s_std + 1e-6)
 
-    # 90/10 train/val split (deterministic by seed)
     import numpy as np
     N = Sn.shape[0]
     idx = np.random.RandomState(seed).permutation(N)
@@ -73,7 +70,7 @@ def main(env_name="hopper-medium-replay-v2", seed=0, steps=20000, bs=1024):
         if updates >= steps:
             break
 
-    # Validation MSE on held-out split
+    # Validation MSE 
     pi.eval()
     with torch.no_grad():
         s_va = torch.from_numpy(S_va).to(device)
