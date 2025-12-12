@@ -1,6 +1,7 @@
 #!/usr/bin/env python
+# tools/collect_results_ablations.py
 """
-Collect FQE and OOD stats for TD3BC-U alpha ablations (ONLY *_alphaX_* checkpoints)
+Collect FQE and OOD stats for alpha ablations (ONLY *_alphaX_* checkpoints)
 and aggregate to CSV + Markdown.
 
 Usage (from repo root):
@@ -18,6 +19,9 @@ This will:
       results/suite_results_ablations.csv
       results/suite_results_ablations_summary.csv
       results/suite_results_ablations_summary.md
+
+IMPORTANT:
+  - The summary groups by (env, method, alpha) so TD3BC and IQL do NOT get mixed.
 """
 
 import argparse
@@ -58,22 +62,15 @@ def parse_seed_from_name(stem: str) -> int | None:
 
 def infer_method_from_name(stem: str) -> str:
     """
-    Keep method names stable but alpha-aware.
-
-    Examples:
-      'td3bc_u_alpha0.5_hopper_medium_replay_v2_seed1' -> 'td3bc_u_alpha0.5'
-      'td3bc_u_alpha1_walker2d_medium_v2_seed0'        -> 'td3bc_u_alpha1'
+    Keep a stable 'method' (algorithm family) and keep alpha in a separate column.
+    This avoids mixing algorithms in aggregation and makes plotting easier.
     """
     if stem.startswith("td3bc_u_"):
-        a = parse_alpha_from_name(stem)
-        if a is not None:
-            # preserve original formatting if you like:
-            # 0.5 -> "0.5", 1.0 -> "1"
-            a_str = str(a).rstrip("0").rstrip(".")
-            return f"td3bc_u_alpha{a_str}"
         return "td3bc_u"
     if stem.startswith("td3bc_"):
         return "td3bc"
+    if stem.startswith("iql_u_"):
+        return "iql_u"
     if stem.startswith("iql_"):
         return "iql"
     if stem.startswith("bc_"):
@@ -131,11 +128,12 @@ AGG_COLS = ["fqe", "ood_mean", "ood_p50", "ood_p90", "ood_p95"]
 
 def agg(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate per-(env, alpha, seed) rows into per-(env, alpha) stats.
+    Aggregate per-(env, method, alpha, seed) rows into per-(env, method, alpha) stats.
+    This prevents mixing td3bc and iql (your n=6 bug).
     """
-    df = df.drop_duplicates(subset=["env", "alpha", "seed", "ckpt"])
+    df = df.drop_duplicates(subset=["env", "method", "alpha", "seed", "ckpt"])
     g = (
-        df.groupby(["env", "alpha"], dropna=False)[AGG_COLS]
+        df.groupby(["env", "method", "alpha"], dropna=False)[AGG_COLS]
         .agg(["mean", "std", "count"])
         .reset_index()
     )
@@ -156,8 +154,8 @@ def fmt_cell(m, s, n):
 
 def to_markdown(out_df: pd.DataFrame) -> str:
     lines = [
-        "| env | alpha | FQE | OOD mean | OOD p50 | OOD p90 | OOD p95 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| env | method | alpha | FQE | OOD mean | OOD p50 | OOD p90 | OOD p95 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for _, r in out_df.iterrows():
         FQE = fmt_cell(r["fqe_mean"], r["fqe_std"], r["fqe_count"])
@@ -166,7 +164,7 @@ def to_markdown(out_df: pd.DataFrame) -> str:
         P90 = fmt_cell(r["ood_p90_mean"], r["ood_p90_std"], r["ood_p90_count"])
         P95 = fmt_cell(r["ood_p95_mean"], r["ood_p95_std"], r["ood_p95_count"])
         lines.append(
-            f"| {r['env']} | {r['alpha']:.3g} | {FQE} | {M} | {P50} | {P90} | {P95} |"
+            f"| {r['env']} | {r['method']} | {r['alpha']:.3g} | {FQE} | {M} | {P50} | {P90} | {P95} |"
         )
     return "\n".join(lines)
 
@@ -202,7 +200,8 @@ def collect_for_ckpt(
 
     method = infer_method_from_name(stem)
     if method == "unknown" and algo is not None:
-        method = algo
+        # Fallback; still keep method stable
+        method = str(algo)
 
     seed_name = parse_seed_from_name(stem)
     seed = seed_ckpt if seed_ckpt is not None else seed_name
@@ -211,7 +210,6 @@ def collect_for_ckpt(
         return None
 
     # --- STANDARD (non-sigma-gated) FQE ---
-    # This calls the normal fqe_evaluate; no gating args are passed.
     set_seed(int(seed))
     _, data = load_d4rl(env_name, int(seed))
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -249,6 +247,9 @@ def main():
                     help="Where to write suite_results_*.csv and summaries.")
     ap.add_argument("--fqe_iters", type=int, default=20000,
                     help="Number of FQE iterations per checkpoint.")
+    ap.add_argument("--method_prefix", type=str, default=None,
+                    help="Optional filter: only keep methods whose filename starts with this prefix "
+                         "(e.g., 'td3bc_u_' or 'iql_u_').")
     args = ap.parse_args()
 
     pt_dir = args.pt_dir
@@ -263,8 +264,11 @@ def main():
 
     # 🔒 Only keep *_alphaX_* checkpoints
     ckpts = [c for c in ckpts if ALPHA_RE.search(osp.basename(c))]
+    if args.method_prefix is not None:
+        ckpts = [c for c in ckpts if osp.basename(c).startswith(args.method_prefix)]
+
     if not ckpts:
-        print(f"[WARN] No *_alphaX_* checkpoints found in {pt_dir}")
+        print(f"[WARN] No matching *_alphaX_* checkpoints found in {pt_dir}")
         return
 
     print(f"[INFO] Found {len(ckpts)} alpha-ablation checkpoints in {pt_dir}")

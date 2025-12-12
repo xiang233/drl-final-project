@@ -1,0 +1,39 @@
+[INFO] Loading checkpoint: generated_data/td3bc_antmaze_umaze_v2_seed0.pt
+[INFO] env_name=antmaze-umaze-v2, seed=0, K=4, gamma=0.99
+[INFO] Reconstructed S_next by shifting for antmaze-umaze-v2: shape=(1000000, 29)
+[INFO] Using device: mps
+[INFO] Loaded critics. has_ensemble=True, K=0
+
+===== Correlation: σ_Q vs TD error (dataset actions) =====
+Pearson r(sigma_ds, td_error)   = 0.6284
+Spearman ρ(sigma_ds, td_error)  = 0.5555
+
+===== Correlation: σ_Q vs TD error (policy actions) =====
+Pearson r(sigma_pi, td_error)   = 0.6261
+Spearman ρ(sigma_pi, td_error)  = 0.5660
+
+===== Binned TD error vs σ_Q (dataset actions, 10 bins) =====
+sigma_ds ~ 0.0027  ->  mean TD error = 0.0061  (n=5000)
+sigma_ds ~ 0.0043  ->  mean TD error = 0.0072  (n=5000)
+sigma_ds ~ 0.0056  ->  mean TD error = 0.0079  (n=5000)
+sigma_ds ~ 0.0068  ->  mean TD error = 0.0086  (n=5000)
+sigma_ds ~ 0.0082  ->  mean TD error = 0.0105  (n=5000)
+sigma_ds ~ 0.0098  ->  mean TD error = 0.0118  (n=5000)
+sigma_ds ~ 0.0123  ->  mean TD error = 0.0143  (n=5000)
+sigma_ds ~ 0.0171  ->  mean TD error = 0.0230  (n=5000)
+sigma_ds ~ 0.0299  ->  mean TD error = 0.0443  (n=5000)
+sigma_ds ~ 0.0895  ->  mean TD error = 0.1371  (n=5000)
+
+===== Binned TD error vs σ_Q (policy actions, 10 bins) =====
+sigma_pi ~ 0.0025  ->  mean TD error = 0.0060  (n=5000)
+sigma_pi ~ 0.0041  ->  mean TD error = 0.0070  (n=5000)
+sigma_pi ~ 0.0053  ->  mean TD error = 0.0077  (n=5000)
+sigma_pi ~ 0.0065  ->  mean TD error = 0.0088  (n=5000)
+sigma_pi ~ 0.0078  ->  mean TD error = 0.0102  (n=5000)
+sigma_pi ~ 0.0094  ->  mean TD error = 0.0116  (n=5000)
+sigma_pi ~ 0.0118  ->  mean TD error = 0.0152  (n=5000)
+sigma_pi ~ 0.0166  ->  mean TD error = 0.0223  (n=5000)
+sigma_pi ~ 0.0296  ->  mean TD error = 0.0442  (n=5000)
+sigma_pi ~ 0.0929  ->  mean TD error = 0.1378  (n=5000)
+
+[INFO] Done. If correlations and binned means are flat/near-zero, σ_Q is a weak signal.

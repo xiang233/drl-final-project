@@ -30,6 +30,37 @@ from scripts.estimate_return import load_policy
 
 # ----------------- small helpers ----------------- #
 
+def load_critics_from_ckpt(state, critics_module):
+    """
+    Loads critics weights into `critics_module`.
+
+    Supports:
+      - ensemble checkpoints: state["critics"]
+      - single-critic checkpoints: state["q"] (K=1 fallback)
+
+    Returns:
+      K_loaded (int), has_ensemble (bool)
+    """
+    if "critics" in state:
+        critics_module.load_state_dict(state["critics"])
+        return int(getattr(critics_module, "K", 0) or 0), True
+
+    if "q" in state:
+        # K=1 fallback: load into the first critic
+        if hasattr(critics_module, "qs"):
+            critics_module.qs[0].load_state_dict(state["q"])
+            return 1, False
+        if hasattr(critics_module, "critics"):
+            critics_module.critics[0].load_state_dict(state["q"])
+            return 1, False
+
+        # If CriticEnsemble is actually a single module (unlikely here)
+        critics_module.load_state_dict(state["q"])
+        return 1, False
+
+    raise KeyError("Checkpoint has neither 'critics' (ensemble) nor 'q' (single critic).")
+
+
 def pearson_corr(x: np.ndarray, y: np.ndarray) -> float:
     """Pearson correlation using numpy only."""
     mask = np.isfinite(x) & np.isfinite(y)
@@ -51,7 +82,6 @@ def spearman_corr(x: np.ndarray, y: np.ndarray) -> float:
     y = y[mask]
     n = x.shape[0]
 
-    # get ranks
     def rank(a):
         order = np.argsort(a)
         ranks = np.empty_like(order, dtype=np.float64)
@@ -158,9 +188,12 @@ def main():
         device = "cpu"
     print(f"[INFO] Using device: {device}")
 
-    # rebuild critics from checkpoint
+    # ---- rebuild critics then load weights (supports TD3BC ensembles + IQL single Q) ----
     critics = CriticEnsemble(s_dim, a_dim, K=K).to(device)
-    critics.load_state_dict(state["critics"])
+
+    # ✅ THIS IS WHERE YOUR SNIPPET GOES
+    K_loaded, has_ensemble = load_critics_from_ckpt(state, critics)
+    print(f"[INFO] Loaded critics. has_ensemble={has_ensemble}, K={K_loaded}")
 
     # policy loader (works for td3bc, td3bc_u, iql, iql_u)
     pi = load_policy(ckpt_path, s_dim, a_dim, device)
@@ -180,24 +213,30 @@ def main():
     # ---------- compute σ_Q and TD error ---------- #
     with torch.no_grad():
         # uncertainty on dataset actions
-        Q_all_ds = critics.forward(S_b, A_b, keepdim=False)      # [B, K]
-        sigma_ds = Q_all_ds.std(dim=1).cpu().numpy()             # [B]
+        Q_all_ds = critics.forward(S_b, A_b, keepdim=False)  # [B, K] (or [B,1] effectively)
+        q_mean_ds = Q_all_ds.mean(dim=1)                     # [B]
+        q_std_ds  = Q_all_ds.std(dim=1)                      # [B]
+
+        # ✅ use the fallback for IQL (no ensemble)
+        sigma_ds = (q_std_ds if has_ensemble else torch.zeros_like(q_mean_ds)).cpu().numpy()
 
         # uncertainty on policy actions
-        A_pi = pi(S_b)                                           # [B, a_dim]
-        Q_all_pi = critics.forward(S_b, A_pi, keepdim=False)     # [B, K]
-        sigma_pi = Q_all_pi.std(dim=1).cpu().numpy()
+        A_pi = pi(S_b)
+        Q_all_pi = critics.forward(S_b, A_pi, keepdim=False)
+        q_mean_pi = Q_all_pi.mean(dim=1)
+        q_std_pi  = Q_all_pi.std(dim=1)
+
+        sigma_pi = (q_std_pi if has_ensemble else torch.zeros_like(q_mean_pi)).cpu().numpy()
 
         # TD target using pessimistic ensemble min at next state, policy action
         A_next = pi(Sn_b)
-        Q_next_all = critics.forward(Sn_b, A_next, keepdim=False)  # [B, K]
+        Q_next_all = critics.forward(Sn_b, A_next, keepdim=False)  # [B, K] (or [B,1])
+
+        # If no ensemble, min==mean==that single value; this is safe either way
         Q_next_min = Q_next_all.min(dim=1).values                  # [B]
 
-        target = R_b + gamma * (1.0 - D_b) * Q_next_min           # [B]
-
-        Q_ds_mean = Q_all_ds.mean(dim=1)                          # [B]
-
-        td_error = (Q_ds_mean - target).abs().cpu().numpy()       # [B]
+        target = R_b + gamma * (1.0 - D_b) * Q_next_min            # [B]
+        td_error = (q_mean_ds - target).abs().cpu().numpy()        # [B]
 
     # ---------- correlations ---------- #
     print("\n===== Correlation: σ_Q vs TD error (dataset actions) =====")

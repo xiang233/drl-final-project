@@ -1,0 +1,38 @@
+[INFO] Loading checkpoint: generated_data/td3bc_hopper_medium_replay_v2_seed0.pt
+[INFO] env_name=hopper-medium-replay-v2, seed=0, K=4, gamma=0.99
+[INFO] Using device: mps
+[INFO] Loaded critics. has_ensemble=True, K=0
+
+===== Correlation: σ_Q vs TD error (dataset actions) =====
+Pearson r(sigma_ds, td_error)   = 0.1566
+Spearman ρ(sigma_ds, td_error)  = 0.2133
+
+===== Correlation: σ_Q vs TD error (policy actions) =====
+Pearson r(sigma_pi, td_error)   = 0.1507
+Spearman ρ(sigma_pi, td_error)  = 0.2056
+
+===== Binned TD error vs σ_Q (dataset actions, 10 bins) =====
+sigma_ds ~ 0.3452  ->  mean TD error = 1.2863  (n=5000)
+sigma_ds ~ 0.5689  ->  mean TD error = 1.3742  (n=5000)
+sigma_ds ~ 0.7318  ->  mean TD error = 1.4349  (n=5000)
+sigma_ds ~ 0.8889  ->  mean TD error = 1.5197  (n=4999)
+sigma_ds ~ 1.0511  ->  mean TD error = 1.5508  (n=5001)
+sigma_ds ~ 1.2370  ->  mean TD error = 1.6518  (n=5000)
+sigma_ds ~ 1.4568  ->  mean TD error = 1.7719  (n=5000)
+sigma_ds ~ 1.7450  ->  mean TD error = 1.8766  (n=5000)
+sigma_ds ~ 2.1825  ->  mean TD error = 2.1524  (n=5000)
+sigma_ds ~ 3.2714  ->  mean TD error = 3.2318  (n=5000)
+
+===== Binned TD error vs σ_Q (policy actions, 10 bins) =====
+sigma_pi ~ 0.3216  ->  mean TD error = 1.3581  (n=5000)
+sigma_pi ~ 0.5325  ->  mean TD error = 1.3273  (n=5000)
+sigma_pi ~ 0.6845  ->  mean TD error = 1.4572  (n=5000)
+sigma_pi ~ 0.8335  ->  mean TD error = 1.4369  (n=5000)
+sigma_pi ~ 0.9877  ->  mean TD error = 1.6367  (n=5000)
+sigma_pi ~ 1.1589  ->  mean TD error = 1.6046  (n=5000)
+sigma_pi ~ 1.3749  ->  mean TD error = 1.7085  (n=5000)
+sigma_pi ~ 1.6532  ->  mean TD error = 1.9310  (n=5000)
+sigma_pi ~ 2.0761  ->  mean TD error = 2.3002  (n=5000)
+sigma_pi ~ 3.1708  ->  mean TD error = 3.0899  (n=5000)
+
+[INFO] Done. If correlations and binned means are flat/near-zero, σ_Q is a weak signal.
